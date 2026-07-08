@@ -79,3 +79,16 @@ export function listForSession(db: Database.Database, sessionId: string): Pendin
     'SELECT * FROM pending_prompts WHERE session_id = ? ORDER BY id ASC'
   ).all(sessionId) as PendingPromptRow[];
 }
+
+export function countBySourceSince(
+  db: Database.Database,
+  sessionId: string,
+  source: string,
+  sinceMs: number
+): number {
+  const row = stmt(
+    db,
+    'SELECT COUNT(*) AS count FROM pending_prompts WHERE session_id = ? AND source = ? AND created_at > ?'
+  ).get(sessionId, source, sinceMs) as { count: number };
+  return row.count;
+}

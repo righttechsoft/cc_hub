@@ -34,6 +34,17 @@ export function renderStopBlockPrompt(prompt: string): string {
   return `A remote prompt was queued via cc-hub: ${prompt}\nExecute it now as if the user typed it.`;
 }
 
+// Chat delivery spawn prompt: injects unread messages into a headless turn for a session that
+// was idle when they arrived (hooks only fire on activity, so nothing else would deliver them).
+export function renderChatDeliveryPrompt(msgs: MessageRow[]): string {
+  const lines = msgs.map(formatMessageLine).join('\n');
+  return (
+    '[cc-hub] Chat messages arrived from other Claude Code instances while this session was idle:\n' +
+    lines +
+    '\nRead them and act if needed. To reply, use the cc-hub MCP tools: call hub_register with your cwd first if not already registered in this session, then chat_send. If no reply or action is needed, acknowledge briefly and stop.'
+  );
+}
+
 // Stop hook decision reason: blocks Stop on urgent unread messages instead of a queued prompt.
 export function renderUrgentBlock(msgs: MessageRow[]): string {
   const urgent = msgs.filter((m) => m.urgent);

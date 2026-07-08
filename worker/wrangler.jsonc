@@ -1,0 +1,9 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "cc-hub-relay",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-07-01",
+  "durable_objects": { "bindings": [{ "name": "HUB_RELAY", "class_name": "HubRelay" }] },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["HubRelay"] }],
+  "observability": { "enabled": true }
+}

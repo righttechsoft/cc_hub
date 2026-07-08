@@ -19,6 +19,8 @@ import { buildHooksRoutes } from './http/hooksRoutes.js';
 import { McpGateway } from './mcp/server.js';
 import { buildApiRoutes } from './http/apiRoutes.js';
 import { buildApp } from './http/app.js';
+import { startRelayClient } from './relay/relayClient.js';
+import { startChatDelivery } from './chat/chatDelivery.js';
 import type { ILimitWatcher } from './types.js';
 
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -40,6 +42,8 @@ const continuation = new ContinuationRunner({ db, bus, log, delivery, config });
 const watcher: ILimitWatcher | undefined = config.limitWatcher.enabled
   ? startLimitWatcher({ db, config, bus, log, continuation })
   : undefined;
+
+const chatDelivery = config.chatDelivery.enabled ? startChatDelivery({ db, log, config, delivery }) : undefined;
 
 const hooksRoutes = buildHooksRoutes({
   config,
@@ -70,6 +74,8 @@ const { app, injectWebSocket } = buildApp({
 
 const server = serve({ fetch: app.fetch, port: config.port, hostname: config.bindAddress });
 injectWebSocket(server);
+
+const relay = config.relay.enabled ? startRelayClient({ config, log }) : undefined;
 
 function runRetention(): void {
   const now = Date.now();
@@ -105,6 +111,8 @@ function shutdown(signal: string): void {
   log.info(`received ${signal}, shutting down`);
   clearInterval(retentionTimer);
   watcher?.stop();
+  relay?.stop();
+  chatDelivery?.stop();
   db.close();
   server.close();
   process.exit(0);

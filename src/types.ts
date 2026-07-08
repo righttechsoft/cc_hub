@@ -5,7 +5,7 @@ export type SessionStatus = 'active' | 'idle' | 'ended' | 'interrupted' | 'conti
 
 export type LimitStateName = 'ok' | 'limited' | 'waiting_reset' | 'continuing' | 'unknown';
 
-export type PendingPromptSource = 'mobile' | 'limit_watcher' | 'api';
+export type PendingPromptSource = 'mobile' | 'limit_watcher' | 'api' | 'chat';
 
 export type PendingPromptStatus = 'queued' | 'delivering' | 'delivered' | 'failed' | 'cancelled';
 
@@ -40,6 +40,8 @@ export interface HubConfig {
     sessionEventsDays: number;
     messagesDays: number;
   };
+  relay: { enabled: boolean; url: string; secret: string };
+  chatDelivery: { enabled: boolean; tickMs: number; maxPerSessionPerHour: number; maxSessionIdleAgeMinutes: number };
   logLevel: 'debug' | 'info' | 'warn' | 'error';
 }
 
@@ -199,7 +201,16 @@ export interface IClaudeRunner {
 }
 
 export interface IPromptDelivery {
-  send(sessionId: string, prompt: string, source: string): Promise<{ delivery: 'queued' | 'spawned'; pendingPromptId: number }>;
+  // onSettled (if provided) is invoked once the actual spawned turn finishes — with `true` if it
+  // completed successfully (exit code 0) and `false` if the spawn/turn failed. It is NOT invoked
+  // for a 'queued' delivery (that prompt is durably queued and will run later regardless). It is
+  // NOT invoked for a synchronous throw from send() itself (callers already see that via rejection).
+  send(
+    sessionId: string,
+    prompt: string,
+    source: string,
+    onSettled?: (ok: boolean) => void
+  ): Promise<{ delivery: 'queued' | 'spawned'; pendingPromptId: number }>;
   claimForStopBlock(sessionId: string): { reason: string } | undefined;
 }
 

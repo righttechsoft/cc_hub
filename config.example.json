@@ -8,5 +8,7 @@
     "prompt": "You were interrupted by a usage limit which has now reset. Continue where you left off.",
     "maxPerSessionPerDay": 3, "maxConcurrent": 1, "eligibleWindowMinutes": 10, "permissionMode": "default" },
   "retention": { "sessionEventsDays": 14, "messagesDays": 90 },
+  "relay": { "enabled": false, "url": "", "secret": "" },
+  "chatDelivery": { "enabled": true, "tickMs": 30000, "maxPerSessionPerHour": 6, "maxSessionIdleAgeMinutes": 240 },
   "logLevel": "info"
 }

@@ -25,6 +25,8 @@ const defaults: HubConfig = {
     permissionMode: 'default',
   },
   retention: { sessionEventsDays: 14, messagesDays: 90 },
+  relay: { enabled: false, url: '', secret: '' },
+  chatDelivery: { enabled: true, tickMs: 30000, maxPerSessionPerHour: 6, maxSessionIdleAgeMinutes: 240 },
   logLevel: 'info',
 };
 
@@ -54,6 +56,10 @@ export function loadConfig(configPath?: string): HubConfig {
 
   if (!merged.authToken || merged.authToken === 'REPLACED_BY_SETUP') {
     throw new Error('authToken is not set in config.json — run npm run setup');
+  }
+
+  if (merged.relay.enabled && (!merged.relay.url || !merged.relay.secret)) {
+    throw new Error('relay.enabled requires relay.url and relay.secret in config.json');
   }
 
   return merged;

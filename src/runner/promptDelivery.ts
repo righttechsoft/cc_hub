@@ -22,6 +22,7 @@ export class PromptDelivery implements IPromptDelivery {
     sessionId: string,
     prompt: string,
     source: string,
+    onSettled?: (ok: boolean) => void,
   ): Promise<{ delivery: 'queued' | 'spawned'; pendingPromptId: number }> {
     const { db, runner, bus, log, config } = this.deps;
 
@@ -89,6 +90,7 @@ export class PromptDelivery implements IPromptDelivery {
           payload: { prompt, source: promptSource, delivery: 'spawned', status },
           createdAt: Date.now(),
         });
+        onSettled?.(status === 'delivered');
       })
       .catch((err: unknown) => {
         const message = err instanceof Error ? err.message : String(err);
@@ -109,6 +111,7 @@ export class PromptDelivery implements IPromptDelivery {
           createdAt: Date.now(),
         });
         log.warn(`PromptDelivery: resumePrompt failed for session ${sessionId}`, { error: message });
+        onSettled?.(false);
       });
 
     return { delivery: 'spawned', pendingPromptId: row.id };

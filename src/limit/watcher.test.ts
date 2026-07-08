@@ -52,6 +52,8 @@ function buildConfig(opts?: {
       ...opts?.autoContinue,
     },
     retention: { sessionEventsDays: 14, messagesDays: 90 },
+    relay: { enabled: false, url: '', secret: '' },
+    chatDelivery: { enabled: true, tickMs: 30000, maxPerSessionPerHour: 6, maxSessionIdleAgeMinutes: 240 },
     logLevel: 'info',
   };
 }
