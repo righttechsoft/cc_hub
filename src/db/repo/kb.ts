@@ -43,13 +43,15 @@ export function get(db: Database.Database, id: number): KbNoteRow | undefined {
 
 // FTS5 MATCH treats bare terms as query syntax (AND/OR/NOT/NEAR, prefix *, column filters);
 // quoting each whitespace-split term makes arbitrary user input safe to match literally.
+// Terms are OR-joined for recall (a multi-word query matching any one word still hits) —
+// bm25 still ranks notes matching more terms higher, so precision survives.
 function sanitizeTerms(query: string, strictAlnum: boolean): string {
   return query
     .split(/\s+/)
     .map((term) => (strictAlnum ? (term.match(/[A-Za-z0-9_]+/g) ?? []).join('') : term))
     .filter((term) => term.length > 0)
     .map((term) => `"${term.replace(/"/g, '""')}"`)
-    .join(' ');
+    .join(' OR ');
 }
 
 const SEARCH_SQL = `
@@ -77,4 +79,42 @@ export function search(db: Database.Database, query: string, limit = 5): KbSearc
     if (strict.length === 0) return [];
     return stmt(db, SEARCH_SQL).all(strict, limit) as KbSearchResult[];
   }
+}
+
+// --- kb_vec: vec0 virtual table (sqlite-vec), created at runtime by athen init — NOT in the
+// migrations array, because the extension must be loaded into the connection before the DDL
+// runs and the hub must still boot when the extension fails to load. Callers guarantee the
+// table exists before using these.
+
+export function upsertVec(db: Database.Database, noteId: number, vec: Float32Array): void {
+  // vec0 has no ON CONFLICT support: delete + insert in one transaction. The PK must be bound
+  // as BigInt — vec0's xUpdate rejects better-sqlite3's number binding as non-integer.
+  const run = db.transaction(() => {
+    stmt(db, 'DELETE FROM kb_vec WHERE note_id = ?').run(noteId);
+    stmt(db, 'INSERT INTO kb_vec (note_id, embedding) VALUES (?, ?)').run(
+      BigInt(noteId),
+      Buffer.from(vec.buffer, vec.byteOffset, vec.byteLength)
+    );
+  });
+  run();
+}
+
+export function knnVec(
+  db: Database.Database,
+  vec: Float32Array,
+  k: number
+): { note_id: number; distance: number }[] {
+  // Vectors are L2-normalized at embed time, so default L2 distance ranks identically to cosine.
+  return stmt(db, 'SELECT note_id, distance FROM kb_vec WHERE embedding MATCH ? AND k = ? ORDER BY distance').all(
+    Buffer.from(vec.buffer, vec.byteOffset, vec.byteLength),
+    k
+  ) as { note_id: number; distance: number }[];
+}
+
+export function notesMissingVec(db: Database.Database, limit: number): KbNoteRow[] {
+  return stmt(
+    db,
+    `SELECT n.* FROM kb_notes n LEFT JOIN kb_vec v ON v.note_id = n.id
+     WHERE v.note_id IS NULL ORDER BY n.id LIMIT ?`
+  ).all(limit) as KbNoteRow[];
 }

@@ -8,14 +8,18 @@ import * as instances from '../db/repo/instances.js';
 import * as sessions from '../db/repo/sessions.js';
 import * as messages from '../db/repo/messages.js';
 import * as kb from '../db/repo/kb.js';
+import type { Athen } from '../kb/athen.js';
 import type { McpIdentity } from './server.js';
 
 export interface HubToolsContext {
   db: Database.Database;
   bus: HubBus;
   log: Logger;
+  athen: Athen;
   getIdentity: () => McpIdentity | undefined;
   bind: (identity: McpIdentity) => void;
+  // Optional: nudges the idle chat delivery loop so chat_send reaches idle recipients immediately.
+  pokeChatDelivery?: () => void;
 }
 
 const NOT_REGISTERED_TEXT = 'Not registered — call hub_register with your cwd first.';
@@ -42,8 +46,8 @@ export function registerHubTools(server: McpServer, ctx: HubToolsContext): void 
     {
       description:
         'Register this Claude Code instance with cc-hub. Call this once at the start of a session, before ' +
-        'using any other cc-hub tool (chat_send, chat_inbox, chat_peers, kb_add, kb_search, kb_get) — those ' +
-        'tools will error until you do. Binds this MCP connection to an instance identity derived from your ' +
+        'using any other cc-hub tool (chat_send, chat_inbox, chat_peers, athen_save, athen_search, athen_get) — ' +
+        'those tools will error until you do. Binds this MCP connection to an instance identity derived from your ' +
         'working directory (or an explicit name if you supply one), so the hub knows who is asking. Returns ' +
         'your resolved instance name, how many unread messages are waiting for you, and the list of other ' +
         'known peer instances. Cheap to call again after a hub restart.',
@@ -134,6 +138,7 @@ export function registerHubTools(server: McpServer, ctx: HubToolsContext): void 
       });
 
       ctx.bus.emit({ type: 'message', message });
+      ctx.pokeChatDelivery?.();
 
       return jsonResult(message);
     }
@@ -207,12 +212,13 @@ export function registerHubTools(server: McpServer, ctx: HubToolsContext): void 
   );
 
   server.registerTool(
-    'kb_add',
+    'athen_save',
     {
       description:
-        'Add a note to the shared knowledge base for other Claude Code instances — in other projects — to ' +
-        'find later. Use this to record setup steps, config gotchas, commands, file paths, or anything you ' +
-        'figured out the hard way that a different instance working on a different project might hit too.',
+        'Save a note to Athen — the shared know-how store all Claude Code instances can search. Use this ' +
+        'when told to "save this to athen", and after figuring out anything reusable the hard way: setup ' +
+        'steps, config gotchas, commands, file paths, how-to instructions. Notes are embedded for semantic ' +
+        'search, so other instances find them by meaning, not exact words.',
       inputSchema: {
         title: z.string().min(1).max(200).describe('Short descriptive title, up to 200 characters.'),
         body: z.string().min(1).max(50000).describe('Full note body, up to 50000 characters.'),
@@ -223,16 +229,15 @@ export function registerHubTools(server: McpServer, ctx: HubToolsContext): void 
           .describe('Space-separated tags to help others find this note.'),
       },
     },
-    (args) => {
+    async (args) => {
       const identity = ctx.getIdentity();
       if (!identity) return notRegistered();
 
-      const note = kb.add(ctx.db, {
+      const note = await ctx.athen.save({
         title: args.title,
         body: args.body,
         tags: args.tags,
         author: identity.instanceName,
-        now: Date.now(),
       });
 
       return jsonResult(note);
@@ -240,33 +245,33 @@ export function registerHubTools(server: McpServer, ctx: HubToolsContext): void 
   );
 
   server.registerTool(
-    'kb_search',
+    'athen_search',
     {
       description:
-        'Search the shared knowledge base. ALWAYS try this before solving a setup, configuration, or tooling ' +
-        'problem from scratch — another instance may have already solved it and left a note. Full-text search ' +
-        'over titles, bodies, and tags.',
+        'Search Athen, the shared know-how store — semantic: finds notes by meaning, not exact words. Use ' +
+        'this when asked "does athen know about X", and ALWAYS before solving a setup, configuration, or ' +
+        'tooling problem from scratch — another instance may have already solved it and left a note.',
       inputSchema: {
-        query: z.string().min(1).describe('Search query (full-text; matches title, body, and tags).'),
+        query: z.string().min(1).describe('What to look for — plain language; matched by meaning and by keywords.'),
         limit: z.number().int().positive().max(50).default(5).describe('Maximum number of results to return.'),
       },
     },
-    (args) => {
+    async (args) => {
       const identity = ctx.getIdentity();
       if (!identity) return notRegistered();
 
-      const results = kb.search(ctx.db, args.query, args.limit);
+      const results = await ctx.athen.search(args.query, args.limit);
 
       return jsonResult({ results, count: results.length });
     }
   );
 
   server.registerTool(
-    'kb_get',
+    'athen_get',
     {
-      description: 'Fetch the full body of a knowledge base note by id (from kb_search results).',
+      description: 'Fetch the full body of an Athen note by id (from athen_search results).',
       inputSchema: {
-        id: z.number().int().positive().describe('Note id, as returned by kb_search.'),
+        id: z.number().int().positive().describe('Note id, as returned by athen_search.'),
       },
     },
     (args) => {
@@ -277,7 +282,7 @@ export function registerHubTools(server: McpServer, ctx: HubToolsContext): void 
       if (!note) {
         return {
           isError: true as const,
-          content: [{ type: 'text' as const, text: `No knowledge base note with id ${args.id}.` }],
+          content: [{ type: 'text' as const, text: `No Athen note with id ${args.id}.` }],
         };
       }
 

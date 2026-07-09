@@ -36,6 +36,7 @@ function buildConfig(opts?: Partial<HubConfig['chatDelivery']>): HubConfig {
       maxPerSessionPerDay: 3,
       maxConcurrent: 1,
       eligibleWindowMinutes: 10,
+      transcriptScanWindowMinutes: 360,
       permissionMode: 'default',
     },
     retention: { sessionEventsDays: 14, messagesDays: 90 },
@@ -45,8 +46,12 @@ function buildConfig(opts?: Partial<HubConfig['chatDelivery']>): HubConfig {
       tickMs: 30_000,
       maxPerSessionPerHour: 3,
       maxSessionIdleAgeMinutes: 60,
+      // Existing tests build idle sessions with lastEventAt = now, which would otherwise trip the
+      // minIdleMinutes gate; default it to 0 here and override per-test where the gate is exercised.
+      minIdleMinutes: 0,
       ...opts,
     },
+    athen: { embeddings: false, model: 'Xenova/all-MiniLM-L6-v2' },
     logLevel: 'info',
   };
 }
@@ -129,6 +134,12 @@ describe('startChatDelivery', () => {
     expect(source).toBe('chat');
     expect(messagesRepo.unreadFor(db, 'recipient')).toHaveLength(0);
 
+    const reads = db
+      .prepare('SELECT via FROM message_reads WHERE reader_name = ?')
+      .all('recipient') as { via: string | null }[];
+    expect(reads).toHaveLength(1);
+    expect(reads[0].via).toBe('chat_delivery');
+
     void senderId;
   });
 
@@ -164,6 +175,53 @@ describe('startChatDelivery', () => {
     await chatDelivery._tick();
 
     expect(delivery.send).not.toHaveBeenCalled();
+  });
+
+  it('delivers to an idle session of any age when maxSessionIdleAgeMinutes is 0', async () => {
+    const db = buildDb();
+    insertInstance(db, 'sender');
+    const recipientId = insertInstance(db, 'recipient');
+    const now = Date.now();
+    const config = buildConfig({ maxSessionIdleAgeMinutes: 0 });
+    const weekOldLastEventAt = now - 7 * 24 * 60 * 60_000;
+    insertSession(db, { id: 'sess-ancient', instanceId: recipientId, status: 'idle', lastEventAt: weekOldLastEventAt });
+    messagesRepo.send(db, { from: 'sender', to: 'recipient', body: 'still reachable', urgent: false, now });
+
+    const delivery = fakeDelivery();
+    const chatDelivery = startDelivery(db, config, silentLogger(), delivery);
+
+    await chatDelivery._tick();
+
+    expect(delivery.send).toHaveBeenCalledTimes(1);
+    expect(delivery.send.mock.calls[0][0]).toBe('sess-ancient');
+  });
+
+  it('skips an idle session that has not been idle for minIdleMinutes yet, delivers once it has', async () => {
+    const db = buildDb();
+    insertInstance(db, 'sender');
+    const recipientId = insertInstance(db, 'recipient');
+    const now = Date.now();
+    const config = buildConfig({ minIdleMinutes: 10 });
+    // Idle for only 5 minutes — under the 10-minute gate — a human is likely still at the terminal.
+    const recentLastEventAt = now - 5 * 60_000;
+    insertSession(db, { id: 'sess-recent-idle', instanceId: recipientId, status: 'idle', lastEventAt: recentLastEventAt });
+    messagesRepo.send(db, { from: 'sender', to: 'recipient', body: 'too soon', urgent: false, now });
+
+    const delivery = fakeDelivery();
+    const chatDelivery = startDelivery(db, config, silentLogger(), delivery);
+
+    await chatDelivery._tick();
+
+    expect(delivery.send).not.toHaveBeenCalled();
+    expect(messagesRepo.unreadFor(db, 'recipient')).toHaveLength(1);
+
+    // Age the same session past the 10-minute gate and re-tick — now it should deliver.
+    sessionsRepo.touchLastEventAt(db, 'sess-recent-idle', now - 11 * 60_000);
+    await chatDelivery._tick();
+
+    expect(delivery.send).toHaveBeenCalledTimes(1);
+    expect(delivery.send.mock.calls[0][0]).toBe('sess-recent-idle');
+    expect(messagesRepo.unreadFor(db, 'recipient')).toHaveLength(0);
   });
 
   it('skips a session that already hit its hourly chat-delivery cap', async () => {

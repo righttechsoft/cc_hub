@@ -141,6 +141,10 @@ const MIGRATIONS: Migration[] = [
       INSERT OR IGNORE INTO limit_state (id, state) VALUES (1, 'unknown');
     `,
   },
+  {
+    version: 2,
+    sql: 'ALTER TABLE message_reads ADD COLUMN via TEXT',
+  },
 ];
 
 export function runMigrations(db: Database.Database): void {

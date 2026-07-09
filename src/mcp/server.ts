@@ -8,6 +8,7 @@ import { isInitializeRequest } from '@modelcontextprotocol/sdk/types.js';
 import type Database from 'better-sqlite3';
 import type { Logger } from '../types.js';
 import type { HubBus } from '../core/bus.js';
+import type { Athen } from '../kb/athen.js';
 import { registerHubTools } from './tools.js';
 
 const HUB_SERVER_VERSION = '0.1.0';
@@ -23,6 +24,10 @@ export interface McpGatewayDeps {
   db: Database.Database;
   bus: HubBus;
   log: Logger;
+  athen: Athen;
+  // Nudges the idle chat delivery loop so a freshly sent message reaches idle recipients
+  // immediately instead of waiting for the next poll tick. Absent when chatDelivery is disabled.
+  pokeChatDelivery?: () => void;
 }
 
 // Bridges Hono's Node HTTP bindings to the MCP SDK's Streamable HTTP transport, one transport
@@ -33,11 +38,15 @@ export class McpGateway {
   private readonly db: Database.Database;
   private readonly bus: HubBus;
   private readonly log: Logger;
+  private readonly athen: Athen;
+  private readonly pokeChatDelivery?: () => void;
 
   constructor(deps: McpGatewayDeps) {
     this.db = deps.db;
     this.bus = deps.bus;
     this.log = deps.log;
+    this.athen = deps.athen;
+    this.pokeChatDelivery = deps.pokeChatDelivery;
   }
 
   identityFor(mcpSessionId: string | undefined): McpIdentity | undefined {
@@ -107,6 +116,8 @@ export class McpGateway {
       db: this.db,
       bus: this.bus,
       log: this.log,
+      athen: this.athen,
+      pokeChatDelivery: this.pokeChatDelivery,
       getIdentity: () => this.identityFor(transport.sessionId),
       bind: (identity) => {
         if (transport.sessionId) this.bindings.set(transport.sessionId, identity);

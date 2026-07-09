@@ -11,6 +11,7 @@ import type {
 import { HubBus } from '../core/bus.js';
 import { fetchUsage, UsageError } from './usageClient.js';
 import { readAccessToken } from './credentials.js';
+import { scanTranscriptsForLimitHits } from './transcriptScan.js';
 import * as sessions from '../db/repo/sessions.js';
 import * as limitRepo from '../db/repo/limit.js';
 
@@ -19,6 +20,7 @@ const FIVE_MIN_MS = 5 * 60 * 1000;
 export interface WatcherIo {
   fetchUsage?: typeof fetchUsage;
   readAccessToken?: typeof readAccessToken;
+  scanTranscripts?: typeof scanTranscriptsForLimitHits;
   now?: () => number;
 }
 
@@ -38,6 +40,7 @@ export function startLimitWatcher(deps: WatcherDeps): ILimitWatcher {
   const io = {
     fetchUsage: deps.io?.fetchUsage ?? fetchUsage,
     readAccessToken: deps.io?.readAccessToken ?? readAccessToken,
+    scanTranscripts: deps.io?.scanTranscripts ?? scanTranscriptsForLimitHits,
     now: deps.io?.now ?? Date.now,
   };
 
@@ -100,6 +103,12 @@ export function startLimitWatcher(deps: WatcherDeps): ILimitWatcher {
       return { ok: true, usage };
     } catch (err) {
       if (err instanceof UsageError) return { ok: false, error: err };
+      // Duck-typed fallback: vitest's parallel transform can load usageClient.js twice, giving
+      // a UsageError whose class identity differs from ours — rebuild it locally so the kind
+      // (and the auth retry-once behavior) survives. Never fires in production (one module).
+      if (err instanceof Error && err.name === 'UsageError' && typeof (err as UsageError).kind === 'string') {
+        return { ok: false, error: new UsageError((err as UsageError).kind, err.message) };
+      }
       return { ok: false, error: new UsageError('net', err instanceof Error ? err.message : String(err)) };
     }
   }
@@ -117,6 +126,27 @@ export function startLimitWatcher(deps: WatcherDeps): ILimitWatcher {
     currentState = 'continuing';
     limitRepo.recordEvent(db, 'continuing', {}, now);
     persistAndEmit(now, null);
+
+    // The ->limited snapshot only covers sessions active/just-stopped at detection time. Idle
+    // sessions whose turn was killed by the limit (however long ago, including while the hub was
+    // down) are found here by transcript evidence and joined onto the 'interrupted' track.
+    // Fail-soft: a scan error never blocks continuation of the snapshot targets.
+    try {
+      const hits = await io.scanTranscripts({
+        db,
+        log,
+        windowMs: config.autoContinue.transcriptScanWindowMinutes * 60_000,
+        now,
+      });
+      if (hits.length > 0) {
+        sessions.markInterrupted(db, hits, now);
+        log.info(`limit watcher: transcript scan tagged ${hits.length} session(s) for continuation`);
+      }
+    } catch (err) {
+      log.warn('limit watcher: transcript scan failed', {
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
 
     try {
       const targets = sessions.interruptedSessions(db);

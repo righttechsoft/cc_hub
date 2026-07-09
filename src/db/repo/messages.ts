@@ -51,14 +51,43 @@ export function unreadFor(db: Database.Database, name: string, limit = 20): Mess
   ).all(name, name, name, limit) as MessageRow[];
 }
 
-export function markRead(db: Database.Database, ids: number[], reader: string, now: number): void {
+export function markRead(db: Database.Database, ids: number[], reader: string, now: number, via?: string): void {
   if (ids.length === 0) return;
   const insert = stmt(
     db,
-    'INSERT OR IGNORE INTO message_reads (message_id, reader_name, read_at) VALUES (?, ?, ?)'
+    'INSERT OR IGNORE INTO message_reads (message_id, reader_name, read_at, via) VALUES (?, ?, ?, ?)'
   );
   const applyAll = db.transaction((messageIds: number[]) => {
-    for (const id of messageIds) insert.run(id, reader, now);
+    for (const id of messageIds) insert.run(id, reader, now, via ?? null);
+  });
+  applyAll(ids);
+}
+
+// Chat-delivery FYI re-surface (see handleUserPromptSubmit): messages that were auto-delivered
+// to a headless turn while this reader's session was idle, and haven't been surfaced to the
+// reader's interactive terminal yet (via = 'chat_delivery', not yet flipped to
+// 'chat_delivery_notified' by markChatDeliveryNotified below). Unbounded by time — the via flip
+// already makes this one-shot, so an arbitrarily old undelivered FYI still surfaces.
+export function listChatDeliveredUnnotified(db: Database.Database, reader: string): MessageRow[] {
+  return stmt(
+    db,
+    `SELECT m.* FROM messages m
+     JOIN message_reads r ON r.message_id = m.id AND r.reader_name = ?
+     WHERE r.via = 'chat_delivery'
+     ORDER BY m.created_at ASC`
+  ).all(reader) as MessageRow[];
+}
+
+// One-shot marker: flips 'chat_delivery' rows to 'chat_delivery_notified' once the FYI has been
+// surfaced to the reader, so the next UserPromptSubmit doesn't re-inject the same messages.
+export function markChatDeliveryNotified(db: Database.Database, ids: number[], reader: string): void {
+  if (ids.length === 0) return;
+  const update = stmt(
+    db,
+    `UPDATE message_reads SET via = 'chat_delivery_notified' WHERE reader_name = ? AND message_id = ?`
+  );
+  const applyAll = db.transaction((messageIds: number[]) => {
+    for (const id of messageIds) update.run(reader, id);
   });
   applyAll(ids);
 }

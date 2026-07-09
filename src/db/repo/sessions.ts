@@ -160,6 +160,30 @@ export function interruptedSessions(db: Database.Database): SessionRow[] {
   ).all() as SessionRow[];
 }
 
+// Candidates for the continue-time transcript scan (src/limit/transcriptScan.ts): every idle
+// session, however old — marker recency is enforced against the transcript itself, not
+// last_event_at, so a session limited hours ago (or while the hub was down) still qualifies.
+export function idleSessionsWithTranscripts(db: Database.Database): SessionRow[] {
+  return stmt(
+    db,
+    `SELECT * FROM sessions WHERE status = 'idle' AND transcript_path IS NOT NULL`
+  ).all() as SessionRow[];
+}
+
+// Marks scan-selected sessions for continuation, joining them onto the same 'interrupted' track
+// the ->limited snapshot uses so interruptedSessions/resetInterruptedToIdle work unchanged.
+export function markInterrupted(db: Database.Database, ids: string[], now: number): void {
+  if (ids.length === 0) return;
+  const update = stmt(
+    db,
+    `UPDATE sessions SET status = 'interrupted', interrupted_at = ? WHERE id = ? AND status != 'ended'`
+  );
+  const applyAll = db.transaction((sessionIds: string[]) => {
+    for (const id of sessionIds) update.run(now, id);
+  });
+  applyAll(ids);
+}
+
 export function resetInterruptedToIdle(db: Database.Database): void {
   stmt(db, `UPDATE sessions SET status = 'idle' WHERE status = 'interrupted'`).run();
 }

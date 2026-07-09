@@ -1,6 +1,7 @@
 import type { MessageRow } from '../types.js';
 
-const KB_LINE = 'Shared knowledge base available: kb_search before solving setup/tooling problems from scratch.';
+const KB_LINE =
+  'Athen shared know-how store available: athen_search before solving setup/tooling problems from scratch; athen_save what you learn.';
 
 function formatHHMM(ms: number): string {
   const d = new Date(ms);
@@ -43,6 +44,17 @@ export function renderChatDeliveryPrompt(msgs: MessageRow[]): string {
     lines +
     '\nRead them and act if needed. To reply, use the cc-hub MCP tools: call hub_register with your cwd first if not already registered in this session, then chat_send. If no reply or action is needed, acknowledge briefly and stop.'
   );
+}
+
+// UserPromptSubmit hook stdout: re-surfaces messages that chatDelivery already delivered (and
+// marked read) to a headless turn while this session's terminal was idle — the interactive
+// terminal never repainted for that turn, so without this the human never learns it happened.
+export function renderChatDeliveredFyi(msgs: MessageRow[]): string {
+  if (msgs.length === 0) return '';
+  return [
+    "[cc-hub] FYI: while this session was idle, the following chat message(s) were delivered to a background headless turn in this same session and are already marked read. That background turn may have acted on or replied to them — this terminal did not display it. Briefly tell the user this happened. Use chat_send if a reply is still needed.",
+    ...msgs.map(formatMessageLine),
+  ].join('\n');
 }
 
 // Stop hook decision reason: blocks Stop on urgent unread messages instead of a queued prompt.

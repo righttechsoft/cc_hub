@@ -4,7 +4,7 @@ A local coordination hub for [Claude Code](https://code.claude.com/docs/en/overv
 
 **Three things it does:**
 
-1. **Inter-instance chat + shared knowledge base** — Claude Code instances working in different project directories can message each other (direct or broadcast) and share searchable know-how notes ("here's how to set up mobile CI on GitHub") via MCP tools. Full-text search over the knowledge base, so an instance can check whether another instance already solved a problem before solving it from scratch.
+1. **Inter-instance chat + Athen, the shared know-how store** — Claude Code instances working in different project directories can message each other (direct or broadcast) and share searchable know-how notes ("here's how to set up mobile CI on GitHub") via MCP tools. Athen (from *Athenaeum*) searches **by meaning, not exact words** (local embeddings + sqlite-vec, fused with FTS5 full-text), so an instance asked "does athen know about shipping iPhone apps" finds the note titled "Building iOS apps" — and can check whether another instance already solved a problem before solving it from scratch. See **Athen — the shared know-how store** below.
 2. **Remote monitoring / control API** — a REST + WebSocket surface for a companion mobile app: watch sessions live, send prompts to a session from your phone, answer permission requests remotely. LAN by default; an optional Cloudflare Worker relay (see below) extends the same API to the open internet without opening a port on your firewall.
 3. **Usage-limit watcher + auto-continue** — polls Claude's usage API, detects "you've hit your usage limit — resets at HH:MM" windows, and automatically resumes the interrupted sessions once the limit resets (with safety caps).
 
@@ -82,11 +82,30 @@ claude --continue
 | `chat_send` | Message another instance by name, or broadcast to all. `urgent: true` interrupts the recipient at its next turn end |
 | `chat_inbox` | Fetch (and by default mark read) your unread messages |
 | `chat_peers` | List known instances: name, project dir, last seen, active flag |
-| `kb_add` | Save a reusable know-how note (title, body, tags) to the shared knowledge base |
-| `kb_search` | Full-text search the knowledge base (FTS5 + BM25) |
-| `kb_get` | Fetch a note's full body by id |
+| `athen_save` | Save a reusable know-how note (title, body, tags) to Athen, the shared know-how store. Notes are embedded locally for semantic search |
+| `athen_search` | Search Athen by meaning, not exact words — hybrid of vector KNN (sqlite-vec + local MiniLM embeddings) and full-text (FTS5 + BM25), fused by reciprocal rank. Degrades to full-text-only if embeddings are unavailable |
+| `athen_get` | Fetch a note's full body by id |
 
 Instance identity is derived from the project directory (basename, with automatic disambiguation on collisions).
+
+## Athen — the shared know-how store
+
+**Athen** (short for *Athenaeum* — a library of collected knowledge) is a single, machine-wide memory shared by every Claude Code instance the hub knows about. Anything one instance learns, every other instance can find later — across projects, across sessions, across weeks.
+
+**Purpose.** Instances keep re-solving the same problems: how to set up CI for iOS, which Postgres grant incantation survives a nightly table rebuild, what flag makes some CLI behave. Athen turns those one-off discoveries into durable, searchable instructions. Tell any instance *"save how to build an iOS app to athen"* and it stores the write-up; ask any other instance *"check if athen knows about shipping iPhone apps"* and it finds that note — **by meaning, not exact words**. "Shipping iPhone apps" matches "Building iOS apps" even though they share no keywords.
+
+**How it works:**
+
+- Notes are plain rows (title, body, tags, author) in the hub's SQLite database — nothing leaves your machine.
+- On save, the note is embedded by a local ONNX model (`Xenova/all-MiniLM-L6-v2` by default, ~25 MB, downloaded once into `data/models/`, runs on CPU — no API keys, no cloud).
+- Search runs two legs and fuses them by reciprocal rank: vector KNN over the embeddings (sqlite-vec) for meaning, FTS5 + BM25 for exact terms. Either leg alone can surface a note; appearing in both boosts it.
+- Notes written before the feature existed (or while embeddings were unavailable) are picked up by a background backfill shortly after hub start, so the whole store stays semantically searchable.
+- Everything is fail-soft: if the ONNX runtime or the sqlite-vec extension can't load on a machine, saves and searches keep working in full-text-only mode — no note is ever lost or unreachable. `athen.embeddings: false` in the config forces that mode explicitly.
+- Swapping `athen.model` for a different embedding model rebuilds the vector table and re-embeds every note automatically on the next start.
+
+**Typical flow** — instance A (in `~/proj-alpha`) figures out code signing after an hour of pain, and is told: *"save that to athen"* → `athen_save {title: "Building iOS apps", body: "...", tags: "xcode signing"}`. A week later instance B (in `~/proj-beta`) is asked to ship an iPhone build; its session-start banner reminds it Athen exists, it calls `athen_search "ship an iphone app"`, gets the note, and `athen_get` pulls the full instructions.
+
+Athen is also reachable over the mobile REST API (`/api/v1/kb/*` routes — the paths keep the historical `kb` name for client compatibility).
 
 ## Hook installer
 
@@ -107,6 +126,7 @@ Base URL: `http://<lan-ip>:<port>/api/v1`. Every request needs `Authorization: B
 | Method & path | Body | Notes |
 |---|---|---|
 | `GET /health` | — | `{status, uptimeMs, limit}` |
+| `POST /sessions` | `{cwd, prompt, permissionMode?}` | Spawns a brand-new headless session (`claude -p`) in `cwd`; fire-and-forget, `{spawned:true}`; 409 if the runner is at max concurrent |
 | `GET /sessions?status=` | — | `status` is a comma-separated list (`active,idle,...`) |
 | `GET /sessions/:id` | — | Session + `instance_name`, `pendingPrompts`, last 20 `events` |
 | `GET /sessions/:id/events?afterId&limit` | — | Paginate forward from `afterId` (default 0), `limit` default 100, max 500 |
@@ -116,7 +136,7 @@ Base URL: `http://<lan-ip>:<port>/api/v1`. Every request needs `Authorization: B
 | `POST /permissions/:id/decision` | `{behavior:"allow"\|"deny", message?}` | 409 if already decided (someone else / timeout got there first) |
 | `GET /messages?limit&beforeId` | — | Chat history, newest first |
 | `POST /messages` | `{to?, body, urgent?}` | `from_name` is always forced to `"mobile"`; omit `to` to broadcast |
-| `GET /kb/search?q=&limit=` | — | Full-text search over the shared knowledge base |
+| `GET /kb/search?q=&limit=` | — | Search Athen (hybrid semantic + full-text, same as `athen_search`) |
 | `GET /kb/:id` | — | Full note body |
 | `POST /kb` | `{title, body, tags?}` | Author is forced to `"mobile"` |
 | `GET /limit` | — | Current `limit_state` row + last 20 `limit_events` |
@@ -144,24 +164,26 @@ Client → server: `{"type":"ping"}` → `{"type":"pong","data":null}`.
 
 ## Auto-continue
 
-When the watcher sees five-hour utilization cross `limitedThresholdPct`, it snapshots which sessions were mid-work ("interrupted"). Once `resets_at` passes (plus `resetJitterMs`) *and* a fresh poll confirms utilization dropped, each interrupted session is resumed headlessly with `autoContinue.prompt`. Guard rails:
+When the watcher sees five-hour utilization cross `limitedThresholdPct` (default 100), it snapshots which sessions were mid-work ("interrupted"). Once `resets_at` passes (plus `resetJitterMs`) *and* a fresh poll confirms utilization dropped, the hub additionally scans the transcripts of **all idle sessions** for a fresh "usage limit reached / waiting for limit to reset" marker (within `autoContinue.transcriptScanWindowMinutes`, default 360) — so a session that hit the limit hours ago, or while the hub itself was down, is still picked up. Every interrupted session is then resumed headlessly with `autoContinue.prompt`. Guard rails:
 
-- `maxPerSessionPerDay` (default 3) — a session that keeps hitting the limit won't loop forever
+- `maxPerSessionPerDay` (default `0` = unlimited; set >0 to cap how often one session may auto-continue per day)
 - `maxConcurrent` (default 1) — resumes are serialized
 - per-session opt-out via `POST /sessions/:id/auto-continue` or the `auto_continue` flag
 - any watcher error degrades to an `unknown` state that never auto-continues blind
+- the transcript scan only trusts markers on API-error/system lines, not ordinary conversation text that merely mentions limits
 
 ## Idle chat delivery
 
-Without this, a message reaches its recipient at one of three moments: injected as context at its next prompt, pushed through the `Stop` hook if it's urgent, or summarized in the banner at session start. That leaves a gap for an instance that's simply gone idle — no more turns coming, so nothing to inject context into. To close it, the hub ticks every `chatDelivery.tickMs` (default 30 s); for each idle session that's sitting on unread messages, it spawns a headless turn (`claude --resume <session-id> -p "..."`) carrying those messages plus an instruction to act on them or reply via `chat_send`. Messages delivered this way are marked read as part of the delivery.
+Without this, a message reaches its recipient at one of three moments: injected as context at its next prompt, pushed through the `Stop` hook if it's urgent, or summarized in the banner at session start. That leaves a gap for an instance that's simply gone idle — no more turns coming, so nothing to inject context into. To close it, the hub ticks every `chatDelivery.tickMs` (default 30 s) **and is poked immediately whenever a message is sent** (via `chat_send` or the mobile API), so an idle recipient normally gets its mail within seconds; for each idle session sitting on unread messages it spawns a headless turn (`claude --resume <session-id> -p "..."`) carrying those messages plus an instruction to act on them or reply via `chat_send`. Messages delivered this way are marked read as part of the delivery.
 
 Guard rails:
 
-- `chatDelivery.maxPerSessionPerHour` (default 6) caps idle-delivery turns per session per hour, so two chatty instances can't bounce messages back and forth into a delivery loop.
-- `chatDelivery.maxSessionIdleAgeMinutes` (default 240) skips sessions that have been idle longer than that — long-abandoned sessions don't get woken up just to read a message.
+- `chatDelivery.maxPerSessionPerHour` (default 20) caps idle-delivery turns per session per hour, so two chatty instances can't bounce messages back and forth into an unbounded delivery loop.
+- `chatDelivery.maxSessionIdleAgeMinutes` (default `0` = no age limit — any idle session stays reachable; set >0 to skip sessions idle longer than that).
+- `chatDelivery.minIdleMinutes` (default `0` = off; set >0 to skip sessions that haven't been idle at least that long — useful if you don't want deliveries while a human may still be sitting at the terminal; the FYI re-surface below covers that case under the defaults).
 - `chatDelivery.enabled: false` turns the tick off entirely; context-injection and `Stop`-hook delivery to active instances keep working as before.
 
-A headless turn spawned this way consumes usage like any other turn, and — same caveat as auto-continue — it won't repaint an interactive terminal left open on that session; the turn lands in the transcript and streams to the hub in real time, but the visible terminal doesn't refresh (see Limitations).
+A headless turn spawned this way consumes usage like any other turn, and — same caveat as auto-continue — it won't repaint an interactive terminal left open on that session; the turn lands in the transcript and streams to the hub in real time, but the visible terminal doesn't refresh (see Limitations). Because of that, if a human returns to the terminal and starts typing before ever noticing the earlier delivery, the hub re-surfaces it: the next `UserPromptSubmit` checks for messages delivered this way and, if any are found, injects a brief FYI note alongside the normal context ("a background turn already handled/replied to these while you were away") and marks them as surfaced so the same note is never shown twice.
 
 ## Configuration reference
 
@@ -183,9 +205,10 @@ A headless turn spawned this way consumes usage like any other turn, and — sam
 | `limitWatcher.resetJitterMs` | Extra delay after `resets_at` before trusting the reset |
 | `autoContinue.enabled` | Master switch for auto-resuming interrupted sessions |
 | `autoContinue.prompt` | The prompt sent to resume an interrupted session |
-| `autoContinue.maxPerSessionPerDay` | Safety cap per session per local calendar day |
+| `autoContinue.maxPerSessionPerDay` | Cap per session per local calendar day (`0` = unlimited, the default) |
 | `autoContinue.maxConcurrent` | How many sessions to auto-continue at once |
-| `autoContinue.eligibleWindowMinutes` | How recently a session must have been active to count as "interrupted" |
+| `autoContinue.eligibleWindowMinutes` | How recently a session must have been active to count as "interrupted" at detection time |
+| `autoContinue.transcriptScanWindowMinutes` | How fresh a transcript's limit marker must be for the continue-time scan to count that idle session as interrupted (default `360`) |
 | `autoContinue.permissionMode` | `--permission-mode` passed to the headless `claude --resume` call |
 | `retention.sessionEventsDays` | `session_events` rows older than this are purged daily |
 | `retention.messagesDays` | Read messages older than this are purged daily (unread messages are never auto-deleted) |
@@ -194,8 +217,11 @@ A headless turn spawned this way consumes usage like any other turn, and — sam
 | `relay.secret` | Shared secret the hub authenticates to the worker with (the `HUB_SECRET` set via `wrangler secret put`) |
 | `chatDelivery.enabled` | Master switch for idle chat delivery (default `true`) |
 | `chatDelivery.tickMs` | How often the hub checks idle sessions for unread messages (default `30000`) |
-| `chatDelivery.maxPerSessionPerHour` | Cap on idle-delivery turns per session per hour (default `6`) |
-| `chatDelivery.maxSessionIdleAgeMinutes` | Sessions idle longer than this are skipped by idle delivery (default `240`) |
+| `chatDelivery.maxPerSessionPerHour` | Cap on idle-delivery turns per session per hour (default `20`) |
+| `chatDelivery.maxSessionIdleAgeMinutes` | Sessions idle longer than this are skipped by idle delivery (default `0` = no age limit) |
+| `chatDelivery.minIdleMinutes` | Sessions idle for less than this are skipped by idle delivery — guards against delivering to a session a human is actively sitting at (default `0` = off) |
+| `athen.embeddings` | Semantic search for Athen notes via local embeddings (default `true`). Kill switch: set `false` if the ONNX runtime or sqlite-vec can't load on your machine — search degrades to full-text-only |
+| `athen.model` | Embedding model id (default `Xenova/all-MiniLM-L6-v2`, ~25 MB, downloaded on first use into `data/models/`). Changing it rebuilds the vector table and re-embeds every note automatically |
 | `logLevel` | `debug\|info\|warn\|error` |
 
 ## Firewall & autostart

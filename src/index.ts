@@ -21,6 +21,8 @@ import { buildApiRoutes } from './http/apiRoutes.js';
 import { buildApp } from './http/app.js';
 import { startRelayClient } from './relay/relayClient.js';
 import { startChatDelivery } from './chat/chatDelivery.js';
+import { createEmbedder } from './kb/embedder.js';
+import { createAthen } from './kb/athen.js';
 import type { ILimitWatcher } from './types.js';
 
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -55,10 +57,28 @@ const hooksRoutes = buildHooksRoutes({
   runner,
 });
 
-const gateway = new McpGateway({ db, bus, log });
+const pokeChatDelivery = chatDelivery ? () => chatDelivery.pokeNow() : undefined;
+
+const embedder = config.athen.embeddings
+  ? createEmbedder({ config, log, modelCacheDir: join(projectRoot, 'data', 'models') })
+  : undefined;
+const athen = createAthen({ db, log, embedder });
+
+const gateway = new McpGateway({ db, bus, log, athen, pokeChatDelivery });
 
 const startedAt = Date.now();
-const apiRoutes = buildApiRoutes({ config, db, bus, log, delivery, watcher, startedAt });
+const apiRoutes = buildApiRoutes({
+  config,
+  db,
+  bus,
+  log,
+  delivery,
+  watcher,
+  runner,
+  athen,
+  startedAt,
+  pokeChatDelivery,
+});
 
 const { app, injectWebSocket } = buildApp({
   config,
@@ -113,6 +133,7 @@ function shutdown(signal: string): void {
   watcher?.stop();
   relay?.stop();
   chatDelivery?.stop();
+  athen.stop();
   db.close();
   server.close();
   process.exit(0);

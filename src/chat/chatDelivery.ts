@@ -75,8 +75,22 @@ export function startChatDelivery(deps: ChatDeliveryDeps): ChatDelivery {
         if (!session.instance_name || seen.has(session.instance_name)) continue;
         seen.add(session.instance_name);
 
-        if (now - session.last_event_at > config.chatDelivery.maxSessionIdleAgeMinutes * 60_000) {
+        // <= 0 means no age limit — any idle session stays reachable however long it's been idle.
+        if (
+          config.chatDelivery.maxSessionIdleAgeMinutes > 0 &&
+          now - session.last_event_at > config.chatDelivery.maxSessionIdleAgeMinutes * 60_000
+        ) {
           continue; // stale session, skip
+        }
+
+        // 0 disables the gate (default): deliveries may spawn while a human sits at the terminal;
+        // the UserPromptSubmit FYI re-surface covers that case.
+        if (now - session.last_event_at < config.chatDelivery.minIdleMinutes * 60_000) {
+          log.debug('chatDelivery: skip — session too recently active, human likely at terminal', {
+            session: session.id,
+            instance: session.instance_name,
+          });
+          continue;
         }
 
         const unread = messagesRepo.unreadFor(db, session.instance_name);
@@ -116,7 +130,13 @@ export function startChatDelivery(deps: ChatDeliveryDeps): ChatDelivery {
           // the prompt queue regardless of runner state, so it's safe to mark read immediately.
           const result = await delivery.send(session.id, renderChatDeliveryPrompt(batch), 'chat', (ok) => {
             if (ok) {
-              messagesRepo.markRead(db, messageIds, instanceName, Date.now());
+              // In the common case, the headless turn's own UserPromptSubmit hook
+              // (hooksRoutes.ts handleUserPromptSubmit) already marked these same messages read
+              // with via='chat_delivery' while runner.isRunning(session.id) was true — this call
+              // then hits INSERT OR IGNORE against an existing, already-correctly-tagged row and
+              // is a no-op. It still matters as a fallback for the rare turn that never reaches
+              // UserPromptSubmit (e.g. spawn errors before CC starts processing the prompt).
+              messagesRepo.markRead(db, messageIds, instanceName, Date.now(), 'chat_delivery');
               log.info('chatDelivery: delivered', {
                 session: session.id,
                 instance: instanceName,
@@ -130,7 +150,7 @@ export function startChatDelivery(deps: ChatDeliveryDeps): ChatDelivery {
             }
           });
           if (result.delivery === 'queued') {
-            messagesRepo.markRead(db, messageIds, instanceName, now);
+            messagesRepo.markRead(db, messageIds, instanceName, now, 'chat_delivery');
             log.info('chatDelivery: delivered', {
               session: session.id,
               instance: instanceName,

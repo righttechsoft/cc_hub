@@ -48,12 +48,20 @@ function buildConfig(opts?: {
       maxPerSessionPerDay: 3,
       maxConcurrent: 1,
       eligibleWindowMinutes: 10,
+      transcriptScanWindowMinutes: 360,
       permissionMode: 'default',
       ...opts?.autoContinue,
     },
     retention: { sessionEventsDays: 14, messagesDays: 90 },
     relay: { enabled: false, url: '', secret: '' },
-    chatDelivery: { enabled: true, tickMs: 30000, maxPerSessionPerHour: 6, maxSessionIdleAgeMinutes: 240 },
+    chatDelivery: {
+      enabled: true,
+      tickMs: 30000,
+      maxPerSessionPerHour: 6,
+      maxSessionIdleAgeMinutes: 240,
+      minIdleMinutes: 10,
+    },
+    athen: { embeddings: false, model: 'Xenova/all-MiniLM-L6-v2' },
     logLevel: 'info',
   };
 }
@@ -82,6 +90,14 @@ function insertActiveSession(db: Database.Database, id: string, instanceId: numb
       (id, instance_id, cwd, status, started_at, last_event_at, auto_continue, continues_today, continues_date)
      VALUES (?, ?, '/proj', 'active', ?, ?, 1, 0, NULL)`
   ).run(id, instanceId, now, now);
+}
+
+function insertIdleSession(db: Database.Database, id: string, instanceId: number, lastEventAt: number): void {
+  db.prepare(
+    `INSERT INTO sessions
+      (id, instance_id, cwd, transcript_path, status, started_at, last_event_at, auto_continue, continues_today, continues_date)
+     VALUES (?, ?, '/proj', ?, 'idle', ?, ?, 1, 0, NULL)`
+  ).run(id, instanceId, `/transcripts/${id}.jsonl`, lastEventAt, lastEventAt);
 }
 
 function sessionStatus(db: Database.Database, id: string): string {
@@ -141,7 +157,15 @@ function startWatcher(
   continuation: IContinuationRunner,
   io: WatcherIo
 ): TickableWatcher {
-  const watcher = startLimitWatcher({ db, config, bus, log: silentLogger(), continuation, io }) as TickableWatcher;
+  const watcher = startLimitWatcher({
+    db,
+    config,
+    bus,
+    log: silentLogger(),
+    continuation,
+    // State-machine tests never touch the filesystem: transcript scan defaults to a no-op stub.
+    io: { scanTranscripts: async () => [], ...io },
+  }) as TickableWatcher;
   watcher.stop();
   return watcher;
 }
@@ -293,6 +317,85 @@ describe('startLimitWatcher state machine', () => {
     expect(sessionStatus(db, 'sess-3')).toBe('idle');
   });
 
+  it('continues a long-idle session found by the transcript scan at continue time', async () => {
+    const db = buildDb();
+    const instanceId = insertInstance(db, 'proj7', '/proj7');
+
+    const bus = new HubBus();
+    const continuation = new FakeContinuation();
+    const clock = makeClock(10_000_000);
+    // Idle for 3 hours — far outside the ->limited snapshot's 5-minute window, so only the
+    // continue-time transcript scan can select it.
+    insertIdleSession(db, 'sess-7', instanceId, clock.now() - 3 * 60 * 60_000);
+    const resetsAt = clock.now() + 30_000;
+
+    const fetchUsage = vi
+      .fn()
+      .mockResolvedValueOnce(makeUsage(100)) // ok -> limited
+      .mockResolvedValueOnce(makeUsage(100, resetsAt)) // limited -> waiting_reset
+      .mockResolvedValueOnce(makeUsage(5, resetsAt)); // past reset -> continuing -> ok
+
+    const scanTranscripts = vi.fn(async (_deps: { windowMs: number }) => ['sess-7']);
+    const config = buildConfig({ limitWatcher: { limitedThresholdPct: 100 } });
+    const watcher = startWatcher(db, config, bus, continuation, {
+      now: clock.now,
+      readAccessToken: () => 'token',
+      fetchUsage,
+      scanTranscripts,
+    });
+
+    await watcher._tick();
+    expect(sessionStatus(db, 'sess-7')).toBe('idle'); // snapshot did NOT pick it up
+
+    await watcher._tick();
+    clock.advance(config.limitWatcher.resetJitterMs + 61_000);
+    await watcher._tick();
+
+    expect(scanTranscripts).toHaveBeenCalledTimes(1);
+    expect(scanTranscripts.mock.calls[0][0]).toMatchObject({ windowMs: 360 * 60_000 });
+    expect(continuation.calls).toHaveLength(1);
+    expect(continuation.calls[0].map((s) => s.id)).toContain('sess-7');
+    expect(sessionStatus(db, 'sess-7')).toBe('idle'); // swept back after the run
+    expect(limitStateRow(db).state).toBe('ok');
+  });
+
+  it('survives a transcript scan failure and still continues snapshot-selected sessions', async () => {
+    const db = buildDb();
+    const instanceId = insertInstance(db, 'proj8', '/proj8');
+    insertActiveSession(db, 'sess-8', instanceId);
+
+    const bus = new HubBus();
+    const continuation = new FakeContinuation();
+    const clock = makeClock(11_000_000);
+    const resetsAt = clock.now() + 30_000;
+
+    const fetchUsage = vi
+      .fn()
+      .mockResolvedValueOnce(makeUsage(100))
+      .mockResolvedValueOnce(makeUsage(100, resetsAt))
+      .mockResolvedValueOnce(makeUsage(5, resetsAt));
+
+    const scanTranscripts = vi.fn(async () => {
+      throw new Error('disk exploded');
+    });
+    const config = buildConfig({ limitWatcher: { limitedThresholdPct: 100 } });
+    const watcher = startWatcher(db, config, bus, continuation, {
+      now: clock.now,
+      readAccessToken: () => 'token',
+      fetchUsage,
+      scanTranscripts,
+    });
+
+    await watcher._tick();
+    await watcher._tick();
+    clock.advance(config.limitWatcher.resetJitterMs + 61_000);
+    await watcher._tick();
+
+    expect(continuation.calls).toHaveLength(1);
+    expect(continuation.calls[0].map((s) => s.id)).toContain('sess-8');
+    expect(limitStateRow(db).state).toBe('ok');
+  });
+
   it('never enters continuing when autoContinue is disabled, recovering directly to ok once pct drops', async () => {
     const db = buildDb();
     const instanceId = insertInstance(db, 'proj6', '/proj6');
@@ -357,6 +460,34 @@ describe('ContinuationRunner', () => {
 
     expect(sent).toHaveLength(0);
     expect(sessionStatus(db, 'sess-4')).toBe('active'); // untouched — never moved to 'continuing'
+  });
+
+  it('treats maxPerSessionPerDay <= 0 as unlimited', async () => {
+    const db = buildDb();
+    const instanceId = insertInstance(db, 'proj9', '/proj9');
+    insertActiveSession(db, 'sess-9', instanceId);
+    const today = localDateString(Date.now());
+    db.prepare('UPDATE sessions SET continues_today = 99, continues_date = ? WHERE id = ?').run(today, 'sess-9');
+
+    const bus = new HubBus();
+    const sent: string[] = [];
+    const delivery: IPromptDelivery = {
+      async send(sessionId) {
+        sent.push(sessionId);
+        return { delivery: 'spawned', pendingPromptId: 1 };
+      },
+      claimForStopBlock() {
+        return undefined;
+      },
+    };
+
+    const config = buildConfig({ autoContinue: { maxPerSessionPerDay: 0 } });
+    const runner = new ContinuationRunner({ db, bus, log: silentLogger(), delivery, config });
+    const sessionRow = db.prepare('SELECT * FROM sessions WHERE id = ?').get('sess-9') as SessionRow;
+
+    await runner.run([sessionRow]);
+
+    expect(sent).toEqual(['sess-9']);
   });
 
   it('continues a session under the cap, bumping its counter and recording the attempt', async () => {

@@ -19,7 +19,12 @@ import type {
 } from '../types.js';
 import type { HubBus } from '../core/bus.js';
 import { instanceNameFromCwd } from '../core/identity.js';
-import { renderInboxContext, renderSessionStartBanner, renderUrgentBlock } from '../core/messageFormat.js';
+import {
+  renderChatDeliveredFyi,
+  renderInboxContext,
+  renderSessionStartBanner,
+  renderUrgentBlock,
+} from '../core/messageFormat.js';
 import * as instancesRepo from '../db/repo/instances.js';
 import * as sessionsRepo from '../db/repo/sessions.js';
 import * as messagesRepo from '../db/repo/messages.js';
@@ -153,17 +158,51 @@ export function buildHooksRoutes(deps: HooksRoutesDeps): Hono {
     bus.emit({ type: 'session_status', sessionId: sess.id, status: 'active' });
     bus.emit({ type: 'session_event', sessionId: sess.id, eventType: 'UserPromptSubmit', payload: { prompt: preview }, createdAt: now });
 
+    // Hub-spawned headless turns (chatDelivery / mobile remote prompt / auto-continue) fire this
+    // same hook, but the interactive terminal never repaints for a `--resume` spawn — no human is
+    // watching this particular UserPromptSubmit. runner.isRunning(sess.id) is true for exactly the
+    // lifetime of such a spawned child process (ClaudeRunner.resumePrompt sets it before spawning
+    // and clears it only after the child exits), so it reliably distinguishes the two cases.
+    const isHubSpawnedTurn = runner.isRunning(sess.id);
+
     const unread = messagesRepo.unreadFor(db, name);
+    let unreadOutput: string | undefined;
     if (unread.length > 0) {
+      // Tag with via='chat_delivery' when this UserPromptSubmit belongs to a hub-spawned turn, so
+      // this write (which happens mid-turn, before the spawner's own onSettled markRead runs) is
+      // the one that actually lands — otherwise the spawner's later INSERT OR IGNORE is a no-op
+      // against this row and the messages never become eligible for the FYI re-surface below.
       messagesRepo.markRead(
         db,
         unread.map((m: MessageRow) => m.id),
         name,
-        now
+        now,
+        isHubSpawnedTurn ? 'chat_delivery' : undefined
       );
-      return renderInboxContext(unread);
+      unreadOutput = renderInboxContext(unread);
     }
-    return undefined;
+
+    // FYI re-surface: messages chatDelivery already delivered (and marked read) to a headless
+    // turn while this session was idle never repainted the interactive terminal — one-shot by
+    // construction, since markChatDeliveryNotified flips `via` so this query won't find them again.
+    // Skip entirely during a hub-spawned headless turn: consuming the one-shot here would burn it
+    // invisibly (the FYI text would be injected into a transcript the human never sees) before
+    // their next real prompt gets a chance to see it.
+    let fyiOutput: string | undefined;
+    if (!isHubSpawnedTurn) {
+      const chatDelivered = messagesRepo.listChatDeliveredUnnotified(db, name);
+      if (chatDelivered.length > 0) {
+        messagesRepo.markChatDeliveryNotified(
+          db,
+          chatDelivered.map((m: MessageRow) => m.id),
+          name
+        );
+        fyiOutput = renderChatDeliveredFyi(chatDelivered);
+      }
+    }
+
+    if (unreadOutput && fyiOutput) return `${unreadOutput}\n\n${fyiOutput}`;
+    return unreadOutput ?? fyiOutput;
   }
 
   function handleNotification(payload: HookPayload): undefined {

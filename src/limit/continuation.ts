@@ -59,7 +59,10 @@ export class ContinuationRunner implements IContinuationRunner {
 
     const today = todayLocalDateString(now);
     const continuesToday = session.continues_date === today ? session.continues_today : 0;
-    if (continuesToday >= this.config.autoContinue.maxPerSessionPerDay) {
+    // cap <= 0 means unlimited (the default) — auto_continue opt-out and autoContinue.enabled
+    // remain the brakes against a session that re-hits the limit every window.
+    const cap = this.config.autoContinue.maxPerSessionPerDay;
+    if (cap > 0 && continuesToday >= cap) {
       this.log.info(`continuation: skip ${session.id} — daily cap reached (${continuesToday})`);
       return;
     }

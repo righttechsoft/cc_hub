@@ -34,6 +34,7 @@ export interface HubConfig {
     maxPerSessionPerDay: number;
     maxConcurrent: number;
     eligibleWindowMinutes: number;
+    transcriptScanWindowMinutes: number;
     permissionMode: string;
   };
   retention: {
@@ -41,7 +42,21 @@ export interface HubConfig {
     messagesDays: number;
   };
   relay: { enabled: boolean; url: string; secret: string };
-  chatDelivery: { enabled: boolean; tickMs: number; maxPerSessionPerHour: number; maxSessionIdleAgeMinutes: number };
+  chatDelivery: {
+    enabled: boolean;
+    tickMs: number;
+    maxPerSessionPerHour: number;
+    maxSessionIdleAgeMinutes: number;
+    minIdleMinutes: number;
+  };
+  athen: {
+    // Kill switch for local embeddings (onnxruntime/sqlite-vec load failure, offline machine).
+    // Off = athen_search degrades to FTS-only; notes are never lost either way.
+    embeddings: boolean;
+    // Changing the model drops and rebuilds the vector table (old vectors are garbage for a
+    // new model); notes re-embed via the startup backfill.
+    model: string;
+  };
   logLevel: 'debug' | 'info' | 'warn' | 'error';
 }
 
@@ -102,6 +117,8 @@ export interface KbSearchResult {
   title: string;
   tags: string;
   snippet: string;
+  // Relevance score; only the ordering is meaningful — bm25 (lower = better) on the FTS-only
+  // path, reciprocal-rank-fusion (higher = better) on the hybrid FTS+vector path.
   rank: number;
 }
 
@@ -197,7 +214,9 @@ export interface IWsHub {
 
 export interface IClaudeRunner {
   resumePrompt(opts: { sessionId: string; cwd: string; prompt: string; permissionMode?: string }): Promise<RunResult>;
+  startNew(opts: { cwd: string; prompt: string; permissionMode?: string }): Promise<RunResult>;
   isRunning(sessionId: string): boolean;
+  atCapacity(): boolean;
 }
 
 export interface IPromptDelivery {

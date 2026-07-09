@@ -1,9 +1,12 @@
 // Mobile API (/api/v1/*). Bearer-auth is applied by app.ts; this file only implements the
 // REST surface described in the plan's "Mobile API" section.
 import { Hono, type Context } from 'hono';
+import { statSync } from 'node:fs';
+import { isAbsolute } from 'node:path';
 import type Database from 'better-sqlite3';
 import type {
   HubConfig,
+  IClaudeRunner,
   ILimitWatcher,
   IPromptDelivery,
   LimitStateName,
@@ -18,6 +21,7 @@ import * as messagesRepo from '../db/repo/messages.js';
 import * as kbRepo from '../db/repo/kb.js';
 import * as permissionsRepo from '../db/repo/permissions.js';
 import * as limitRepo from '../db/repo/limit.js';
+import type { Athen } from '../kb/athen.js';
 
 export interface BuildApiRoutesDeps {
   config: HubConfig;
@@ -26,7 +30,12 @@ export interface BuildApiRoutesDeps {
   log: Logger;
   delivery: IPromptDelivery;
   watcher: ILimitWatcher | undefined;
+  runner: IClaudeRunner;
+  athen: Athen;
   startedAt: number;
+  // Optional: nudges the idle chat delivery loop so a mobile-sent message reaches idle recipients
+  // immediately instead of waiting for the next poll tick.
+  pokeChatDelivery?: () => void;
 }
 
 function isRecord(v: unknown): v is Record<string, unknown> {
@@ -80,6 +89,11 @@ function isLimitStateName(v: unknown): v is LimitStateName {
   return typeof v === 'string' && (LIMIT_STATE_NAMES as readonly string[]).includes(v);
 }
 
+const PERMISSION_MODES = ['default', 'acceptEdits', 'plan', 'bypassPermissions'] as const;
+function isPermissionMode(v: unknown): v is (typeof PERMISSION_MODES)[number] {
+  return typeof v === 'string' && (PERMISSION_MODES as readonly string[]).includes(v);
+}
+
 async function readJsonBody(c: Context): Promise<Record<string, unknown> | undefined> {
   try {
     const body: unknown = await c.req.json();
@@ -90,7 +104,7 @@ async function readJsonBody(c: Context): Promise<Record<string, unknown> | undef
 }
 
 export function buildApiRoutes(deps: BuildApiRoutesDeps): Hono {
-  const { config, db, bus, log, delivery, watcher, startedAt } = deps;
+  const { config, db, bus, log, delivery, watcher, runner, athen, startedAt, pokeChatDelivery } = deps;
   const app = new Hono();
 
   app.get('/health', (c) => {
@@ -99,6 +113,53 @@ export function buildApiRoutes(deps: BuildApiRoutesDeps): Hono {
       uptimeMs: Date.now() - startedAt,
       limit: limitRepo.getState(db),
     });
+  });
+
+  app.post('/sessions', async (c) => {
+    const body = await readJsonBody(c);
+
+    const cwd = body && typeof body.cwd === 'string' ? body.cwd : undefined;
+    if (!cwd || cwd.length === 0) return badRequest(c, 'cwd is required');
+
+    const prompt = body && typeof body.prompt === 'string' ? body.prompt : undefined;
+    if (!prompt || prompt.length === 0) return badRequest(c, 'prompt is required');
+    if (prompt.length > MAX_PROMPT_LENGTH) {
+      return badRequest(c, `prompt exceeds maximum length of ${MAX_PROMPT_LENGTH} characters`);
+    }
+
+    const permissionModeRaw = body?.permissionMode;
+    if (permissionModeRaw !== undefined && !isPermissionMode(permissionModeRaw)) {
+      return badRequest(c, `permissionMode must be one of ${PERMISSION_MODES.join('|')}`);
+    }
+    const permissionMode = permissionModeRaw as (typeof PERMISSION_MODES)[number] | undefined;
+
+    if (!isAbsolute(cwd)) return badRequest(c, 'cwd must be an absolute path');
+
+    try {
+      const stat = statSync(cwd);
+      if (!stat.isDirectory()) return badRequest(c, 'cwd is not a directory');
+    } catch {
+      return badRequest(c, 'cwd does not exist');
+    }
+
+    if (runner.atCapacity()) {
+      return conflict(c, 'runner at max concurrent sessions');
+    }
+
+    runner
+      .startNew({ cwd, prompt, permissionMode })
+      .then((result) => {
+        if (result.code !== 0) {
+          log.warn('apiRoutes: startNew exited non-zero', { cwd, code: result.code, stderr: result.stderr });
+        } else {
+          log.info('apiRoutes: startNew completed', { cwd, code: result.code });
+        }
+      })
+      .catch((err: unknown) => {
+        log.warn('apiRoutes: startNew failed', { cwd, error: err instanceof Error ? err.message : String(err) });
+      });
+
+    return c.json({ spawned: true }, 202);
   });
 
   app.get('/sessions', (c) => {
@@ -214,13 +275,14 @@ export function buildApiRoutes(deps: BuildApiRoutesDeps): Hono {
 
     const message = messagesRepo.send(db, { from: 'mobile', to, body: messageBody, urgent, now: Date.now() });
     bus.emit({ type: 'message', message });
+    pokeChatDelivery?.();
     return c.json({ message }, 201);
   });
 
-  app.get('/kb/search', (c) => {
+  app.get('/kb/search', async (c) => {
     const q = c.req.query('q') ?? '';
     const limit = clamp(parseIntWithDefault(c.req.query('limit'), 5), 1, 50);
-    const results = kbRepo.search(db, q, limit);
+    const results = await athen.search(q, limit);
     return c.json({ results });
   });
 
@@ -239,7 +301,7 @@ export function buildApiRoutes(deps: BuildApiRoutesDeps): Hono {
     if (!title || !kbBody) return badRequest(c, 'title and body are required');
     const tags = body && typeof body.tags === 'string' ? body.tags : '';
 
-    const note = kbRepo.add(db, { title, body: kbBody, tags, author: 'mobile', now: Date.now() });
+    const note = await athen.save({ title, body: kbBody, tags, author: 'mobile' });
     return c.json({ note }, 201);
   });
 

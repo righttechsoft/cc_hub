@@ -11,6 +11,7 @@ interface RunningEntry {
 /** Direct-spawns claude.exe --resume for headless turn delivery. One child per session, capped globally by maxConcurrent. */
 export class ClaudeRunner implements IClaudeRunner {
   private readonly running = new Map<string, RunningEntry>();
+  private newSessionCounter = 0;
 
   constructor(
     private readonly claudePath: string,
@@ -30,6 +31,10 @@ export class ClaudeRunner implements IClaudeRunner {
     return false;
   }
 
+  atCapacity(): boolean {
+    return this.running.size >= this.maxConcurrent;
+  }
+
   async resumePrompt(opts: {
     sessionId: string;
     cwd: string;
@@ -41,27 +46,12 @@ export class ClaudeRunner implements IClaudeRunner {
     if (this.isRunning(sessionId)) {
       throw new Error(`ClaudeRunner: session ${sessionId} is already running`);
     }
-    if (this.running.size >= this.maxConcurrent) {
+    if (this.atCapacity()) {
       throw new Error(
         `ClaudeRunner: max concurrent runs (${this.maxConcurrent}) reached, cannot start session ${sessionId}`,
       );
     }
 
-    this.running.set(sessionId, { cwd });
-
-    try {
-      return await this.spawnAndWait(sessionId, cwd, prompt, permissionMode);
-    } finally {
-      this.running.delete(sessionId);
-    }
-  }
-
-  private spawnAndWait(
-    sessionId: string,
-    cwd: string,
-    prompt: string,
-    permissionMode: string | undefined,
-  ): Promise<RunResult> {
     const args = [
       '--resume',
       sessionId,
@@ -72,6 +62,41 @@ export class ClaudeRunner implements IClaudeRunner {
       ...(permissionMode ? ['--permission-mode', permissionMode] : []),
     ];
 
+    this.running.set(sessionId, { cwd });
+
+    try {
+      return await this.spawnAndWait(sessionId, cwd, args);
+    } finally {
+      this.running.delete(sessionId);
+    }
+  }
+
+  async startNew(opts: { cwd: string; prompt: string; permissionMode?: string }): Promise<RunResult> {
+    const { cwd, prompt, permissionMode } = opts;
+
+    if (this.atCapacity()) {
+      throw new Error(`ClaudeRunner: max concurrent runs (${this.maxConcurrent}) reached, cannot start new session`);
+    }
+
+    const args = [
+      '-p',
+      prompt,
+      '--output-format',
+      'json',
+      ...(permissionMode ? ['--permission-mode', permissionMode] : []),
+    ];
+
+    const key = `new:${++this.newSessionCounter}`;
+    this.running.set(key, { cwd });
+
+    try {
+      return await this.spawnAndWait(key, cwd, args);
+    } finally {
+      this.running.delete(key);
+    }
+  }
+
+  private spawnAndWait(key: string, cwd: string, args: string[]): Promise<RunResult> {
     const startedAt = Date.now();
 
     return new Promise<RunResult>((resolve) => {
@@ -99,7 +124,7 @@ export class ClaudeRunner implements IClaudeRunner {
       let settled = false;
 
       const killTimer = setTimeout(() => {
-        this.log.warn(`ClaudeRunner: session ${sessionId} exceeded 30min, killing`);
+        this.log.warn(`ClaudeRunner: session ${key} exceeded 30min, killing`);
         child.kill();
       }, KILL_TIMEOUT_MS);
 
