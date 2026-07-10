@@ -23,6 +23,7 @@ import { startRelayClient } from './relay/relayClient.js';
 import { startChatDelivery } from './chat/chatDelivery.js';
 import { createEmbedder } from './kb/embedder.js';
 import { createAthen } from './kb/athen.js';
+import { startDesktopNotifier } from './notify/desktopNotifier.js';
 import type { ILimitWatcher } from './types.js';
 
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -45,7 +46,11 @@ const watcher: ILimitWatcher | undefined = config.limitWatcher.enabled
   ? startLimitWatcher({ db, config, bus, log, continuation })
   : undefined;
 
-const chatDelivery = config.chatDelivery.enabled ? startChatDelivery({ db, log, config, delivery }) : undefined;
+const chatDelivery = config.chatDelivery.enabled ? startChatDelivery({ db, log, config, runner }) : undefined;
+
+const desktopNotifier = config.notifications.enabled
+  ? startDesktopNotifier({ db, bus, config, log })
+  : undefined;
 
 const hooksRoutes = buildHooksRoutes({
   config,
@@ -133,6 +138,7 @@ function shutdown(signal: string): void {
   watcher?.stop();
   relay?.stop();
   chatDelivery?.stop();
+  desktopNotifier?.stop();
   athen.stop();
   db.close();
   server.close();

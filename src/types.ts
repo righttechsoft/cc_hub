@@ -45,9 +45,7 @@ export interface HubConfig {
   chatDelivery: {
     enabled: boolean;
     tickMs: number;
-    maxPerSessionPerHour: number;
-    maxSessionIdleAgeMinutes: number;
-    minIdleMinutes: number;
+    maxSpawnsPerInstancePerHour: number;
   };
   athen: {
     // Kill switch for local embeddings (onnxruntime/sqlite-vec load failure, offline machine).
@@ -56,6 +54,13 @@ export interface HubConfig {
     // Changing the model drops and rebuilds the vector table (old vectors are garbage for a
     // new model); notes re-embed via the startup backfill.
     model: string;
+  };
+  notifications: {
+    enabled: boolean;
+    permissionRequests: boolean;
+    needsInput: boolean;
+    turnEnd: boolean;
+    limit: boolean;
   };
   logLevel: 'debug' | 'info' | 'warn' | 'error';
 }
@@ -216,6 +221,7 @@ export interface IClaudeRunner {
   resumePrompt(opts: { sessionId: string; cwd: string; prompt: string; permissionMode?: string }): Promise<RunResult>;
   startNew(opts: { cwd: string; prompt: string; permissionMode?: string }): Promise<RunResult>;
   isRunning(sessionId: string): boolean;
+  runningCwd(cwd: string): boolean;
   atCapacity(): boolean;
 }
 

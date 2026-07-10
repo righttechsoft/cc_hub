@@ -42,11 +42,10 @@ function buildConfig(): HubConfig {
     chatDelivery: {
       enabled: true,
       tickMs: 30_000,
-      maxPerSessionPerHour: 6,
-      maxSessionIdleAgeMinutes: 240,
-      minIdleMinutes: 10,
+      maxSpawnsPerInstancePerHour: 4,
     },
     athen: { embeddings: false, model: 'Xenova/all-MiniLM-L6-v2' },
+    notifications: { enabled: false, permissionRequests: true, needsInput: true, turnEnd: false, limit: true },
     logLevel: 'info',
   };
 }
@@ -76,6 +75,7 @@ function fakeRunner(opts?: { atCapacity?: boolean }): IClaudeRunner & { startNew
     startNew: vi.fn().mockResolvedValue(fakeRunResult()),
     resumePrompt: vi.fn(),
     isRunning: () => false,
+    runningCwd: () => false,
     atCapacity: vi.fn().mockReturnValue(opts?.atCapacity ?? false),
   };
 }

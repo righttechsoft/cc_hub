@@ -213,6 +213,16 @@ export function linkResumedFrom(db: Database.Database, newSessionId: string, old
   stmt(db, 'UPDATE sessions SET resumed_from = ? WHERE id = ?').run(oldSessionId, newSessionId);
 }
 
+// chatDelivery: an instance mid-turn already gets its mail through the normal hooks (Stop
+// urgent-block / next UserPromptSubmit) — this is the guard that keeps chatDelivery from
+// starting a second, redundant session alongside a turn that's actively running.
+export function hasActiveSession(db: Database.Database, instanceId: number): boolean {
+  const row = stmt(db, `SELECT id FROM sessions WHERE instance_id = ? AND status = 'active' LIMIT 1`).get(
+    instanceId
+  ) as { id: string } | undefined;
+  return row !== undefined;
+}
+
 export function findRecentByCwd(
   db: Database.Database,
   cwd: string,

@@ -30,11 +30,10 @@ const defaults: HubConfig = {
   chatDelivery: {
     enabled: true,
     tickMs: 30000,
-    maxPerSessionPerHour: 20,
-    maxSessionIdleAgeMinutes: 0,
-    minIdleMinutes: 0,
+    maxSpawnsPerInstancePerHour: 4,
   },
   athen: { embeddings: true, model: 'Xenova/all-MiniLM-L6-v2' },
+  notifications: { enabled: true, permissionRequests: true, needsInput: true, turnEnd: false, limit: true },
   logLevel: 'info',
 };
 

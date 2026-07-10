@@ -162,8 +162,11 @@ export function buildHooksRoutes(deps: HooksRoutesDeps): Hono {
     // same hook, but the interactive terminal never repaints for a `--resume` spawn — no human is
     // watching this particular UserPromptSubmit. runner.isRunning(sess.id) is true for exactly the
     // lifetime of such a spawned child process (ClaudeRunner.resumePrompt sets it before spawning
-    // and clears it only after the child exits), so it reliably distinguishes the two cases.
-    const isHubSpawnedTurn = runner.isRunning(sess.id);
+    // and clears it only after the child exits), so it reliably distinguishes the two cases for a
+    // --resume turn. A chatDelivery spawn-fallback turn (runner.startNew, no session id to key on
+    // yet) is instead keyed by cwd in the runner's running map — runningCwd(sess.cwd) catches that
+    // case, which isRunning(sess.id) alone would miss (see CLAUDE.md gotcha, now fixed by this).
+    const isHubSpawnedTurn = runner.isRunning(sess.id) || runner.runningCwd(sess.cwd);
 
     const unread = messagesRepo.unreadFor(db, name);
     let unreadOutput: string | undefined;

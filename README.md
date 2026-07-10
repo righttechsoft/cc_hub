@@ -8,6 +8,8 @@ A local coordination hub for [Claude Code](https://code.claude.com/docs/en/overv
 2. **Remote monitoring / control API** — a REST + WebSocket surface for a companion mobile app: watch sessions live, send prompts to a session from your phone, answer permission requests remotely. LAN by default; an optional Cloudflare Worker relay (see below) extends the same API to the open internet without opening a port on your firewall.
 3. **Usage-limit watcher + auto-continue** — polls Claude's usage API, detects "you've hit your usage limit — resets at HH:MM" windows, and automatically resumes the interrupted sessions once the limit resets (with safety caps).
 
+It also raises **desktop toast notifications** (Windows/macOS/Linux) for the moments you'd actually want to glance over — a permission request waiting on you, a session that's gone idle needing input, the usage limit being hit or clearing — see **Desktop notifications** below.
+
 > **Scope & platform:** built for a trusted personal LAN — one bearer token, normally over plain HTTP, not designed for internet exposure out of the box. The optional relay (see **Remote access**) carries that same single-bearer-token trust model out onto the internet, with the token checked at Cloudflare's edge over TLS rather than on your home network. Developed and tested on **Windows** (Node ≥ 22); the limit watcher reads Claude credentials via `%USERPROFILE%`, so other platforms need minor path adjustments.
 
 ## How it works
@@ -29,10 +31,11 @@ A local coordination hub for [Claude Code](https://code.claude.com/docs/en/overv
 ```
 
 - **Hooks** installed in `~/.claude/settings.json` report session lifecycle events to the hub (turn-level only by default). The hook script is *fail-silent by contract*: if the hub is down it prints nothing and exits 0, so Claude Code behaves exactly as if no hook were installed.
-- **Chat delivery** rides on those hooks while an instance is active: unread messages are injected as context at the start of the next turn; urgent messages and remotely queued prompts are delivered through a `Stop`-hook block, so the instance acts on them at the end of its current turn. Once an instance goes idle, a separate hub-side tick takes over — see **Idle chat delivery** below.
+- **Chat delivery** rides on those hooks while an instance is active: unread messages are injected as context at the start of the next turn; urgent messages and remotely queued prompts are delivered through a `Stop`-hook block, so the instance acts on them at the end of its current turn. For anything not currently active, a separate hub-side tick takes over — see **Chat delivery to non-active instances** below.
 - **Remote prompts** to an idle session are delivered by spawning `claude --resume <session-id> -p "<prompt>"` headlessly — the turn lands in the same session transcript, and its hooks stream activity back to the hub (and your phone) in real time.
 - **Permission requests** long-poll the hub for up to `permissionWaitMs` (default 30 s); answer from your phone, or let it fall through to the normal terminal prompt.
 - **The limit watcher** is a tick-driven state machine (`ok → limited → waiting_reset → continuing → ok`) that survives machine sleep, backs off on API errors, and never auto-continues unless a fresh poll confirms the limit actually reset.
+- **Desktop notifications** subscribe to the same event bus that drives everything above — a permission request, a session needing input, hitting/clearing the usage limit, and (off by default) every turn ending each raise an OS toast, independently toggleable — see **Desktop notifications** below.
 
 ## Requirements
 
@@ -172,18 +175,31 @@ When the watcher sees five-hour utilization cross `limitedThresholdPct` (default
 - any watcher error degrades to an `unknown` state that never auto-continues blind
 - the transcript scan only trusts markers on API-error/system lines, not ordinary conversation text that merely mentions limits
 
-## Idle chat delivery
+## Chat delivery to non-active instances
 
-Without this, a message reaches its recipient at one of three moments: injected as context at its next prompt, pushed through the `Stop` hook if it's urgent, or summarized in the banner at session start. That leaves a gap for an instance that's simply gone idle — no more turns coming, so nothing to inject context into. To close it, the hub ticks every `chatDelivery.tickMs` (default 30 s) **and is poked immediately whenever a message is sent** (via `chat_send` or the mobile API), so an idle recipient normally gets its mail within seconds; for each idle session sitting on unread messages it spawns a headless turn (`claude --resume <session-id> -p "..."`) carrying those messages plus an instruction to act on them or reply via `chat_send`. Messages delivered this way are marked read as part of the delivery.
+Without this, a message reaches its recipient at one of three moments: injected as context at its next prompt, pushed through the `Stop` hook if it's urgent, or summarized in the banner at session start. That leaves a gap for an instance with nothing currently running — idle, ended, or Claude Code never actually run there in the first place — no turn in flight to inject context into. To close it, the hub ticks every `chatDelivery.tickMs` (default 30 s) **and is poked immediately whenever a message is sent** (via `chat_send` or the mobile API), so a reachable recipient normally gets its mail within seconds: for every instance sitting on unread messages that has no session currently `active`, it starts a **brand-new** headless session in that instance's project directory (`claude -p "..."` — never `--resume`) carrying those messages plus an instruction to act on them or reply via `chat_send`. Messages are marked read once that new session exits successfully. The new session self-registers with the hub via the normal `SessionStart` hook.
+
+An idle or ended session doesn't change any of this — it neither blocks the fresh spawn nor gets reused by it. Earlier versions of this mechanism only handled idle sessions, and did so by `--resume`ing them; that's gone; every delivery is now a fresh spawn, because an idle terminal never repaints for a `--resume` turn either, so there was no benefit to reusing its session id over just starting a clean one.
 
 Guard rails:
 
-- `chatDelivery.maxPerSessionPerHour` (default 20) caps idle-delivery turns per session per hour, so two chatty instances can't bounce messages back and forth into an unbounded delivery loop.
-- `chatDelivery.maxSessionIdleAgeMinutes` (default `0` = no age limit — any idle session stays reachable; set >0 to skip sessions idle longer than that).
-- `chatDelivery.minIdleMinutes` (default `0` = off; set >0 to skip sessions that haven't been idle at least that long — useful if you don't want deliveries while a human may still be sitting at the terminal; the FYI re-surface below covers that case under the defaults).
+- `chatDelivery.maxSpawnsPerInstancePerHour` (default 4) caps how many new sessions the hub will start for the same instance per hour (counted per attempt, not per success), so two chatty instances can't bounce messages back and forth into an unbounded delivery loop.
 - `chatDelivery.enabled: false` turns the tick off entirely; context-injection and `Stop`-hook delivery to active instances keep working as before.
 
-A headless turn spawned this way consumes usage like any other turn, and — same caveat as auto-continue — it won't repaint an interactive terminal left open on that session; the turn lands in the transcript and streams to the hub in real time, but the visible terminal doesn't refresh (see Limitations). Because of that, if a human returns to the terminal and starts typing before ever noticing the earlier delivery, the hub re-surfaces it: the next `UserPromptSubmit` checks for messages delivered this way and, if any are found, injects a brief FYI note alongside the normal context ("a background turn already handled/replied to these while you were away") and marks them as surfaced so the same note is never shown twice.
+A headless turn spawned this way consumes usage like any other turn, and — same caveat as auto-continue — it won't repaint an interactive terminal left open in that project directory; the turn lands in its own new transcript and streams to the hub in real time, but the visible terminal (if one is open there) doesn't refresh (see Limitations). Because of that, if a human returns to the terminal and starts typing before ever noticing the earlier delivery, the hub re-surfaces it: the next `UserPromptSubmit` checks for messages delivered this way and, if any are found, injects a brief FYI note alongside the normal context ("a background turn already handled/replied to these while you were away") and marks them as surfaced so the same note is never shown twice.
+
+## Desktop notifications
+
+The hub raises OS toast notifications ([node-notifier](https://www.npmjs.com/package/node-notifier), which bundles SnoreToast for Windows and covers macOS/Linux the same way) for a handful of moments worth glancing at, each with its own on/off toggle:
+
+| Moment | Toggle (default) | Toast |
+|---|---|---|
+| A tool call is waiting on your permission decision | `notifications.permissionRequests` (`true`) | `<instance> — permission` with the tool name and a preview of its input |
+| A session goes idle needing input (Claude Code's own "waiting" notification) | `notifications.needsInput` (`true`) | `<instance> needs input` |
+| A turn ends | `notifications.turnEnd` (`false` — noisy if left on) | `<instance> finished a turn` |
+| The usage limit is hit, or clears back to normal | `notifications.limit` (`true`) | one toast entering the limited state, one toast on recovery — never a toast per poll tick |
+
+`notifications.enabled: false` turns the whole feature off. Every toast call is wrapped so a notification failure (no notification daemon running, SnoreToast missing, etc.) is logged at debug level and never affects the hub itself — v1 is fire-and-forget, no click actions.
 
 ## Configuration reference
 
@@ -215,13 +231,16 @@ A headless turn spawned this way consumes usage like any other turn, and — sam
 | `relay.enabled` | Turn on the Cloudflare Worker relay for remote (off-LAN) access (default `false`) |
 | `relay.url` | The deployed worker's URL, e.g. `https://cc-hub-relay.<account>.workers.dev` |
 | `relay.secret` | Shared secret the hub authenticates to the worker with (the `HUB_SECRET` set via `wrangler secret put`) |
-| `chatDelivery.enabled` | Master switch for idle chat delivery (default `true`) |
-| `chatDelivery.tickMs` | How often the hub checks idle sessions for unread messages (default `30000`) |
-| `chatDelivery.maxPerSessionPerHour` | Cap on idle-delivery turns per session per hour (default `20`) |
-| `chatDelivery.maxSessionIdleAgeMinutes` | Sessions idle longer than this are skipped by idle delivery (default `0` = no age limit) |
-| `chatDelivery.minIdleMinutes` | Sessions idle for less than this are skipped by idle delivery — guards against delivering to a session a human is actively sitting at (default `0` = off) |
+| `chatDelivery.enabled` | Master switch for chat delivery to non-active instances (default `true`) |
+| `chatDelivery.tickMs` | How often the hub checks instances with unread messages (default `30000`) |
+| `chatDelivery.maxSpawnsPerInstancePerHour` | Cap on brand-new sessions the hub will start per instance per hour (default `4`) |
 | `athen.embeddings` | Semantic search for Athen notes via local embeddings (default `true`). Kill switch: set `false` if the ONNX runtime or sqlite-vec can't load on your machine — search degrades to full-text-only |
 | `athen.model` | Embedding model id (default `Xenova/all-MiniLM-L6-v2`, ~25 MB, downloaded on first use into `data/models/`). Changing it rebuilds the vector table and re-embeds every note automatically |
+| `notifications.enabled` | Master switch for desktop toast notifications (default `true`) |
+| `notifications.permissionRequests` | Toast when a tool call is waiting on your permission decision (default `true`) |
+| `notifications.needsInput` | Toast when a session goes idle needing input (default `true`) |
+| `notifications.turnEnd` | Toast when a turn ends (default `false` — noisy if left on) |
+| `notifications.limit` | Toast on entering/recovering from the usage-limited state (default `true`) |
 | `logLevel` | `debug\|info\|warn\|error` |
 
 ## Firewall & autostart
