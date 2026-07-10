@@ -328,6 +328,10 @@ class ConnectionManager extends ChangeNotifier {
       return;
     }
     _ws = channel;
+    unawaited(channel.ready.catchError((Object _) {
+      // Failure also surfaces via the stream's onError/onDone; swallowing here
+      // only prevents an unhandled async exception.
+    }));
     _lastInboundFrameAt = DateTime.now(); // start the dead-man window now
 
     channel.stream.listen(

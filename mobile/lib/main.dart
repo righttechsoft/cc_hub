@@ -8,30 +8,34 @@ import 'screens/home.dart';
 import 'screens/setup.dart';
 import 'settings.dart';
 import 'store.dart';
+import 'theme.dart';
+import 'theme_controller.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
-  runApp(const RestartWidget(child: CcHubApp()));
+  final themeController = await ThemeController.load();
+  runApp(
+    ChangeNotifierProvider<ThemeController>.value(
+      value: themeController,
+      child: const RestartWidget(child: AppRoot()),
+    ),
+  );
 }
 
-class CcHubApp extends StatelessWidget {
-  const CcHubApp({super.key});
-
-  @override
-  Widget build(BuildContext context) {
-    return MaterialApp(
-      title: 'cc_hub',
-      theme: ThemeData(
-        colorScheme: ColorScheme.fromSeed(seedColor: Colors.deepPurple),
-        useMaterial3: true,
-      ),
-      home: const AppRoot(),
-    );
-  }
-}
-
-/// Loads persisted settings once per (re)start and decides between
-/// [SetupScreen] and a fully wired [HomeScreen].
+/// Loads persisted settings once per (re)start and decides between the
+/// setup flow and the fully wired main app.
+///
+/// Each branch owns its own [MaterialApp] (and therefore its own Navigator).
+/// This matters for the wired branch: [_HubServicesRoot] must put its
+/// [MultiProvider] *above* that MaterialApp's Navigator, or screens reached
+/// via `Navigator.push` — SessionDetail, NewSession, Permissions, the KB
+/// note sheet, Settings — sit in the Navigator's overlay as siblings of the
+/// first route's content, not as descendants of it, so they can't see a
+/// Provider planted only inside that first route.
+///
+/// [ThemeController] lives above [RestartWidget] (provided in [main]) so the
+/// dark/light choice survives a Setup-save restart untouched; every
+/// MaterialApp branch below just reads it for `theme`/`darkTheme`/`themeMode`.
 class AppRoot extends StatefulWidget {
   const AppRoot({super.key});
 
@@ -50,15 +54,28 @@ class _AppRootState extends State<AppRoot> {
 
   @override
   Widget build(BuildContext context) {
+    final themeMode = context.watch<ThemeController>().value;
     return FutureBuilder<AppSettings?>(
       future: _settingsFuture,
       builder: (context, snapshot) {
         if (snapshot.connectionState != ConnectionState.done) {
-          return const Scaffold(body: Center(child: CircularProgressIndicator()));
+          return MaterialApp(
+            title: 'cc_hub',
+            theme: buildTheme(dark: false),
+            darkTheme: buildTheme(dark: true),
+            themeMode: themeMode,
+            home: const Scaffold(body: Center(child: CircularProgressIndicator())),
+          );
         }
         final settings = snapshot.data;
         if (settings == null) {
-          return const SetupScreen();
+          return MaterialApp(
+            title: 'cc_hub',
+            theme: buildTheme(dark: false),
+            darkTheme: buildTheme(dark: true),
+            themeMode: themeMode,
+            home: const SetupScreen(),
+          );
         }
         return _HubServicesRoot(settings: settings);
       },
@@ -66,9 +83,10 @@ class _AppRootState extends State<AppRoot> {
   }
 }
 
-/// Owns the ConnectionManager/ApiClient/HubStore for one set of AppSettings
-/// and provides them to the widget tree below. [RestartWidget] is what
-/// produces a fresh instance after Setup saves.
+/// Owns the ConnectionManager/ApiClient/HubStore for one set of AppSettings,
+/// provides them via MultiProvider, and wraps its own MaterialApp so the
+/// provider scope sits above that MaterialApp's Navigator (see [AppRoot]).
+/// [RestartWidget] is what produces a fresh instance after Setup saves.
 class _HubServicesRoot extends StatefulWidget {
   final AppSettings settings;
 
@@ -121,13 +139,20 @@ class _HubServicesRootState extends State<_HubServicesRoot> with WidgetsBindingO
 
   @override
   Widget build(BuildContext context) {
+    final themeMode = context.watch<ThemeController>().value;
     return MultiProvider(
       providers: [
         ChangeNotifierProvider<ConnectionManager>.value(value: _connection),
         Provider<ApiClient>.value(value: _api),
         ChangeNotifierProvider<HubStore>.value(value: _store),
       ],
-      child: const HomeScreen(),
+      child: MaterialApp(
+        title: 'cc_hub',
+        theme: buildTheme(dark: false),
+        darkTheme: buildTheme(dark: true),
+        themeMode: themeMode,
+        home: const HomeScreen(),
+      ),
     );
   }
 }

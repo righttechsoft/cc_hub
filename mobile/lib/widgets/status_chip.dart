@@ -1,42 +1,82 @@
 import 'package:flutter/material.dart';
 
-/// Small colored pill for a session's status, shared by the sessions list
-/// and session detail screens so the color mapping stays in one place.
+import '../theme.dart';
+
+/// How a status is rendered: [label] is bare colored uppercase text (used in
+/// the Sessions list row, which already has its own left color bar), [pill]
+/// is a bordered mono chip with a status-colored dot (used in Session
+/// Detail's sub-row).
+enum StatusChipStyle { label, pill }
+
+/// Status treatment shared by the sessions list and session detail screens.
+///
+/// The design's Utilitarian direction ships 3 statuses (idle/ended/running);
+/// cc_hub has 5. Mapping: active->running, idle->idle, ended->ended,
+/// interrupted->warn, continuing->accent (its own tone, not in the design).
 class StatusChip extends StatelessWidget {
   final String status;
+  final StatusChipStyle style;
 
-  const StatusChip({super.key, required this.status});
+  const StatusChip({super.key, required this.status, this.style = StatusChipStyle.label});
 
-  Color _color() {
+  static Color colorFor(String status, HubTokens tokens) {
     switch (status) {
       case 'active':
-        return Colors.green;
+        return tokens.stRunning;
       case 'idle':
-        return Colors.grey;
-      case 'interrupted':
-        return Colors.orange;
-      case 'continuing':
-        return Colors.blue;
+        return tokens.stIdle;
       case 'ended':
-        return Colors.grey.shade800;
+        return tokens.stEnded;
+      case 'interrupted':
+        return tokens.stWarn;
+      case 'continuing':
+        return tokens.accent;
       default:
-        return Colors.grey;
+        return tokens.dim;
+    }
+  }
+
+  static String labelFor(String status) {
+    switch (status) {
+      case 'active':
+        return 'RUNNING';
+      case 'interrupted':
+        return 'INTERRUPTED';
+      default:
+        return status.toUpperCase();
     }
   }
 
   @override
   Widget build(BuildContext context) {
-    final color = _color();
+    final tokens = context.tokens;
+    final color = colorFor(status, tokens);
+    final label = labelFor(status);
+
+    if (style == StatusChipStyle.label) {
+      return Text(
+        label,
+        style: hubSans(size: 9.5, weight: FontWeight.w700, color: color, letterSpacing: 0.76),
+      );
+    }
+
     return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
       decoration: BoxDecoration(
-        color: color.withValues(alpha: 0.15),
-        borderRadius: BorderRadius.circular(12),
-        border: Border.all(color: color),
+        border: Border.all(color: tokens.border),
+        borderRadius: BorderRadius.circular(kRadiusChip),
       ),
-      child: Text(
-        status,
-        style: TextStyle(color: color, fontSize: 12, fontWeight: FontWeight.w600),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Container(
+            width: 6,
+            height: 6,
+            decoration: BoxDecoration(color: color, shape: BoxShape.circle),
+          ),
+          const SizedBox(width: 5),
+          Text(label, style: hubMono(size: 10, weight: FontWeight.w600, color: color, letterSpacing: 0.5)),
+        ],
       ),
     );
   }

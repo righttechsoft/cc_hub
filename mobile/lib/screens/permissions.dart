@@ -9,6 +9,7 @@ import '../connection.dart';
 import '../models.dart';
 import '../relative_time.dart';
 import '../store.dart';
+import '../theme.dart';
 
 /// Pending permissions (with a 30s advisory countdown) plus recent decided
 /// history. The countdown is advisory only — the hook's actual timeout is
@@ -98,8 +99,73 @@ class _PermissionsScreenState extends State<PermissionsScreen> {
     super.dispose();
   }
 
+  Widget _pendingCard(BuildContext context, Permission perm, HubStore store, int now) {
+    final tokens = context.tokens;
+    final remainingMs = (perm.createdAt + _windowMs) - now;
+    final remainingSec = (remainingMs / 1000).clamp(0, _windowMs / 1000).floor();
+    final instanceLabel = store.sessions[perm.sessionId]?.instanceName ?? perm.sessionId;
+
+    return Card(
+      margin: const EdgeInsets.only(bottom: 12),
+      child: Padding(
+        padding: const EdgeInsets.all(12),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                Expanded(
+                  child: Text(
+                    perm.toolName,
+                    style: hubSans(size: 13, weight: FontWeight.w700, color: tokens.text),
+                  ),
+                ),
+                Text('${remainingSec}s', style: hubMono(size: 11, color: tokens.dim)),
+              ],
+            ),
+            const SizedBox(height: 2),
+            Text(instanceLabel, style: hubMono(size: 10.5, color: tokens.dim)),
+            const SizedBox(height: 8),
+            if (perm.toolInput != null && perm.toolInput!.isNotEmpty)
+              Container(
+                width: double.infinity,
+                constraints: const BoxConstraints(maxHeight: 160),
+                padding: const EdgeInsets.all(8),
+                decoration: BoxDecoration(
+                  color: tokens.surface2,
+                  borderRadius: BorderRadius.circular(kRadiusCard),
+                ),
+                child: SingleChildScrollView(
+                  child: Text(
+                    _prettyToolInput(perm.toolInput),
+                    style: hubMono(size: 11, color: tokens.dim),
+                  ),
+                ),
+              ),
+            const SizedBox(height: 8),
+            TextField(
+              controller: _controllerFor(perm.id),
+              style: hubSans(size: 12.5, color: tokens.text),
+              decoration: const InputDecoration(labelText: 'Message (optional)'),
+            ),
+            const SizedBox(height: 8),
+            Row(
+              mainAxisAlignment: MainAxisAlignment.end,
+              children: [
+                TextButton(onPressed: () => _decide(perm, 'deny'), child: const Text('Deny')),
+                const SizedBox(width: 8),
+                FilledButton(onPressed: () => _decide(perm, 'allow'), child: const Text('Allow')),
+              ],
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
+    final tokens = context.tokens;
     final store = context.watch<HubStore>();
     final pending = [...store.pending]..sort((a, b) => a.createdAt.compareTo(b.createdAt));
     final now = DateTime.now().millisecondsSinceEpoch;
@@ -110,92 +176,39 @@ class _PermissionsScreenState extends State<PermissionsScreen> {
         padding: const EdgeInsets.all(12),
         children: [
           if (pending.isEmpty)
-            const Padding(
-              padding: EdgeInsets.symmetric(vertical: 16),
-              child: Text('No pending permissions'),
+            Padding(
+              padding: const EdgeInsets.symmetric(vertical: 16),
+              child: Text('No pending permissions', style: hubSans(size: 13, color: tokens.dim)),
             )
           else
-            ...pending.map((perm) {
-              final remainingMs = (perm.createdAt + _windowMs) - now;
-              final remainingSec = (remainingMs / 1000).clamp(0, _windowMs / 1000).floor();
-              final instanceLabel = store.sessions[perm.sessionId]?.instanceName ?? perm.sessionId;
-              return Card(
-                margin: const EdgeInsets.only(bottom: 12),
-                child: Padding(
-                  padding: const EdgeInsets.all(12),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Row(
-                        children: [
-                          Expanded(
-                            child: Text(
-                              perm.toolName,
-                              style: const TextStyle(fontWeight: FontWeight.bold),
-                            ),
-                          ),
-                          Text('${remainingSec}s'),
-                        ],
-                      ),
-                      Text(instanceLabel, style: Theme.of(context).textTheme.bodySmall),
-                      const SizedBox(height: 8),
-                      if (perm.toolInput != null && perm.toolInput!.isNotEmpty)
-                        Container(
-                          width: double.infinity,
-                          constraints: const BoxConstraints(maxHeight: 160),
-                          padding: const EdgeInsets.all(8),
-                          decoration: BoxDecoration(
-                            color: Theme.of(context).colorScheme.surfaceContainerHighest,
-                            borderRadius: BorderRadius.circular(4),
-                          ),
-                          child: SingleChildScrollView(
-                            child: Text(
-                              _prettyToolInput(perm.toolInput),
-                              style: const TextStyle(fontFamily: 'monospace', fontSize: 12),
-                            ),
-                          ),
-                        ),
-                      const SizedBox(height: 8),
-                      TextField(
-                        controller: _controllerFor(perm.id),
-                        decoration: const InputDecoration(labelText: 'Message (optional)'),
-                      ),
-                      const SizedBox(height: 8),
-                      Row(
-                        mainAxisAlignment: MainAxisAlignment.end,
-                        children: [
-                          TextButton(
-                            onPressed: () => _decide(perm, 'deny'),
-                            child: const Text('Deny'),
-                          ),
-                          const SizedBox(width: 8),
-                          FilledButton(
-                            onPressed: () => _decide(perm, 'allow'),
-                            child: const Text('Allow'),
-                          ),
-                        ],
-                      ),
-                    ],
-                  ),
-                ),
-              );
-            }),
+            ...pending.map((perm) => _pendingCard(context, perm, store, now)),
           const Divider(height: 32),
-          Text('History', style: Theme.of(context).textTheme.titleMedium),
+          Text(
+            'History',
+            style: hubSans(size: 14, weight: FontWeight.w700, color: tokens.text),
+          ),
           const SizedBox(height: 8),
           if (_loadingHistory)
             const Center(child: CircularProgressIndicator())
           else if (_history.isEmpty)
-            const Text('No decided permissions yet')
+            Text('No decided permissions yet', style: hubSans(size: 13, color: tokens.dim))
           else
             ..._history.map(
               (perm) => ListTile(
                 dense: true,
-                title: Text(perm.toolName),
+                contentPadding: EdgeInsets.zero,
+                title: Text(
+                  perm.toolName,
+                  style: hubSans(size: 13, weight: FontWeight.w600, color: tokens.text),
+                ),
                 subtitle: Text(
                   '${perm.status}${perm.decidedBy != null ? ' by ${perm.decidedBy}' : ''}',
+                  style: hubSans(size: 11.5, color: tokens.dim),
                 ),
-                trailing: Text(formatRelativeTime(perm.decidedAt ?? perm.createdAt)),
+                trailing: Text(
+                  formatRelativeTime(perm.decidedAt ?? perm.createdAt),
+                  style: hubMono(size: 10, color: tokens.faint),
+                ),
               ),
             ),
         ],

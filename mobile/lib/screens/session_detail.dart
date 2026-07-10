@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
@@ -8,6 +9,9 @@ import '../connection.dart';
 import '../models.dart';
 import '../relative_time.dart';
 import '../store.dart';
+import '../theme.dart';
+import '../widgets/accent_square_button.dart';
+import '../widgets/mini_toggle.dart';
 import '../widgets/status_chip.dart';
 
 class _TimelineEvent {
@@ -18,8 +22,46 @@ class _TimelineEvent {
   const _TimelineEvent({required this.type, this.payload, required this.createdAt});
 }
 
+/// Best-effort human-readable one-liner for an event's JSON payload (the
+/// `prompt` or `message` field, if present) — display-only, never affects
+/// what's fetched or stored.
+String? _humanSummary(String? payload) {
+  if (payload == null || payload.isEmpty) return null;
+  try {
+    final decoded = jsonDecode(payload);
+    if (decoded is Map) {
+      final prompt = decoded['prompt'];
+      if (prompt is String && prompt.trim().isNotEmpty) return prompt;
+      final message = decoded['message'];
+      if (message is String && message.trim().isNotEmpty) return message;
+    }
+  } catch (_) {
+    // Not JSON / not decodable — no summary available.
+  }
+  return null;
+}
+
+Color _toneColor(String type, HubTokens tokens) {
+  switch (type) {
+    case 'UserPromptSubmit':
+      return tokens.accent;
+    case 'Notification':
+      return tokens.stWarn;
+    case 'Stop':
+      return tokens.dim;
+    default:
+      return tokens.dim;
+  }
+}
+
 /// Session detail: header (live status via store), event timeline (backfill
-/// + live via store.eventFrames), prompt composer, auto-continue switch.
+/// + live via store.eventFrames), prompt composer, auto-continue toggle.
+///
+/// Timeline renders newest-first (matches the design): the underlying
+/// [_events] list still stores oldest-at-0/newest-appended-last exactly as
+/// before, only the ListView's `reverse: true` flag changes how it's drawn,
+/// so "newest" now visually means "top" and the jump button scrolls to
+/// offset 0 instead of the end.
 class SessionDetailScreen extends StatefulWidget {
   final String sessionId;
 
@@ -63,7 +105,7 @@ class _SessionDetailScreenState extends State<SessionDetailScreen> {
             .toList();
         _loading = false;
       });
-      _scrollToBottomSoon();
+      _scrollToNewestSoon();
     } catch (e) {
       if (!mounted) return;
       setState(() {
@@ -85,18 +127,19 @@ class _SessionDetailScreenState extends State<SessionDetailScreen> {
         ),
       ];
     });
-    _scrollToBottomSoon();
+    _scrollToNewestSoon();
   }
 
-  void _scrollToBottomSoon() {
+  void _scrollToNewestSoon() {
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!_scrollController.hasClients) return;
-      _scrollController.animateTo(
-        _scrollController.position.maxScrollExtent,
-        duration: const Duration(milliseconds: 200),
-        curve: Curves.easeOut,
-      );
+      _scrollController.animateTo(0, duration: const Duration(milliseconds: 200), curve: Curves.easeOut);
     });
+  }
+
+  void _jumpToNewest() {
+    if (!_scrollController.hasClients) return;
+    _scrollController.animateTo(0, duration: const Duration(milliseconds: 300), curve: Curves.easeOut);
   }
 
   Future<void> _send() async {
@@ -161,111 +204,280 @@ class _SessionDetailScreenState extends State<SessionDetailScreen> {
     super.dispose();
   }
 
+  Widget _header(BuildContext context, Session? session, String? liveStatus) {
+    final tokens = context.tokens;
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(12, 4, 12, 10),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              InkWell(
+                onTap: () => Navigator.of(context).pop(),
+                borderRadius: BorderRadius.circular(kRadiusCard),
+                child: SizedBox(
+                  width: 30,
+                  height: 30,
+                  child: Icon(Icons.arrow_back, size: 18, color: tokens.text),
+                ),
+              ),
+              Expanded(
+                child: Text(
+                  session?.instanceName ?? widget.sessionId,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: hubSans(
+                    size: 16,
+                    weight: FontWeight.w700,
+                    color: tokens.text,
+                    letterSpacing: -0.16,
+                  ),
+                ),
+              ),
+              if (session != null) ...[
+                const SizedBox(width: 8),
+                Text('Auto', style: hubSans(size: 11, color: tokens.dim)),
+                const SizedBox(width: 8),
+                MiniToggle(
+                  value: session.autoContinue != 0,
+                  onChanged: _autoContinueBusy ? null : _toggleAutoContinue,
+                ),
+              ],
+            ],
+          ),
+          if (session != null) ...[
+            const SizedBox(height: 9),
+            Row(
+              children: [
+                StatusChip(status: liveStatus ?? session.status, style: StatusChipStyle.pill),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Text(
+                    session.cwd,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: hubMono(size: 11, color: tokens.dim),
+                  ),
+                ),
+              ],
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+
+  Widget _eventRow(BuildContext context, _TimelineEvent e) {
+    final tokens = context.tokens;
+    final tone = _toneColor(e.type, tokens);
+    final summary = e.type == 'Stop' ? null : _humanSummary(e.payload);
+
+    return IntrinsicHeight(
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          SizedBox(
+            width: 14,
+            child: Column(
+              children: [
+                const SizedBox(height: 4),
+                Container(
+                  width: 10,
+                  height: 10,
+                  decoration: BoxDecoration(color: tone, borderRadius: BorderRadius.circular(3)),
+                ),
+                const SizedBox(height: 3),
+                Expanded(child: Container(width: 2, color: tokens.border)),
+              ],
+            ),
+          ),
+          const SizedBox(width: 11),
+          Expanded(
+            child: Padding(
+              padding: const EdgeInsets.only(bottom: 14),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Row(
+                    crossAxisAlignment: CrossAxisAlignment.baseline,
+                    textBaseline: TextBaseline.alphabetic,
+                    children: [
+                      Expanded(
+                        child: Text(
+                          e.type,
+                          style: hubSans(size: 13, weight: FontWeight.w700, color: tone),
+                        ),
+                      ),
+                      const SizedBox(width: 8),
+                      Text(formatRelativeTime(e.createdAt), style: hubMono(size: 10, color: tokens.faint)),
+                    ],
+                  ),
+                  if (e.type == 'Stop')
+                    Padding(
+                      padding: const EdgeInsets.only(top: 3),
+                      child: Text('null', style: hubMono(size: 11, color: tokens.faint)),
+                    )
+                  else if (summary != null) ...[
+                    Padding(
+                      padding: const EdgeInsets.only(top: 5),
+                      child: Container(
+                        width: double.infinity,
+                        padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 7),
+                        decoration: BoxDecoration(
+                          color: tokens.surface,
+                          border: Border.all(color: tokens.border),
+                          borderRadius: BorderRadius.circular(kRadiusCard),
+                        ),
+                        child: Text(
+                          summary,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: hubSans(size: 12, color: tokens.text, height: 1.4),
+                        ),
+                      ),
+                    ),
+                    Padding(
+                      padding: const EdgeInsets.only(top: 4),
+                      child: Text(
+                        e.payload ?? '',
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: hubMono(size: 9.5, color: tokens.faint),
+                      ),
+                    ),
+                  ],
+                ],
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _composer(BuildContext context) {
+    final tokens = context.tokens;
+    return Container(
+      padding: const EdgeInsets.fromLTRB(12, 9, 12, 12),
+      decoration: BoxDecoration(color: tokens.navBg, border: Border(top: BorderSide(color: tokens.border))),
+      child: SafeArea(
+        top: false,
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.end,
+          children: [
+            Row(
+              crossAxisAlignment: CrossAxisAlignment.end,
+              children: [
+                Expanded(
+                  child: TextField(
+                    controller: _promptController,
+                    maxLength: 8000,
+                    maxLines: 4,
+                    minLines: 1,
+                    buildCounter: (context, {required currentLength, required isFocused, maxLength}) => null,
+                    decoration: const InputDecoration(hintText: 'Prompt'),
+                  ),
+                ),
+                const SizedBox(width: 9),
+                AccentSquareButton(
+                  size: 38,
+                  radius: kRadiusSend,
+                  onTap: _sending ? null : _send,
+                  child: _sending
+                      ? SizedBox(
+                          width: 16,
+                          height: 16,
+                          child: CircularProgressIndicator(strokeWidth: 2, color: tokens.accentInk),
+                        )
+                      : Icon(Icons.arrow_forward, size: 17, color: tokens.accentInk),
+                ),
+              ],
+            ),
+            const SizedBox(height: 4),
+            ValueListenableBuilder<TextEditingValue>(
+              valueListenable: _promptController,
+              builder: (context, value, _) => Text(
+                '${value.text.length}/8000',
+                style: hubMono(size: 9.5, color: tokens.faint),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
+    final tokens = context.tokens;
     final store = context.watch<HubStore>();
     final session = _session;
     final liveStatus = store.sessions[widget.sessionId]?.status ?? session?.status;
 
     return Scaffold(
-      appBar: AppBar(
-        title: Text(session?.instanceName ?? widget.sessionId),
-        actions: [
-          if (session != null)
-            Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 4),
-              child: Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  const Text('Auto'),
-                  Switch(
-                    value: session.autoContinue != 0,
-                    onChanged: _autoContinueBusy ? null : _toggleAutoContinue,
-                  ),
-                ],
-              ),
-            ),
-        ],
-      ),
       body: _loading
           ? const Center(child: CircularProgressIndicator())
           : _loadError != null
-              ? Center(child: Text('Failed to load: $_loadError'))
-              : Column(
-                  children: [
-                    if (session != null)
-                      Padding(
-                        padding: const EdgeInsets.all(12),
-                        child: Row(
-                          children: [
-                            StatusChip(status: liveStatus ?? session.status),
-                            const SizedBox(width: 8),
-                            Expanded(
-                              child: Text(
-                                session.cwd,
-                                maxLines: 1,
-                                overflow: TextOverflow.ellipsis,
-                              ),
-                            ),
-                          ],
-                        ),
-                      ),
-                    Expanded(
-                      child: _events.isEmpty
-                          ? const Center(child: Text('No events yet'))
+          ? Center(
+              child: Text(
+                'Failed to load: $_loadError',
+                style: hubSans(size: 13, color: tokens.dim),
+              ),
+            )
+          : Column(
+              children: [
+                _header(context, session, liveStatus),
+                Expanded(
+                  child: Stack(
+                    children: [
+                      _events.isEmpty
+                          ? Center(
+                              child: Text('No events yet', style: hubSans(size: 13, color: tokens.dim)),
+                            )
                           : ListView.builder(
+                              reverse: true,
                               controller: _scrollController,
+                              padding: const EdgeInsets.fromLTRB(16, 6, 16, 6),
                               itemCount: _events.length,
-                              itemBuilder: (context, index) {
-                                final e = _events[index];
-                                return ListTile(
-                                  dense: true,
-                                  title: Text(e.type, style: const TextStyle(fontWeight: FontWeight.bold)),
-                                  subtitle: Text(
-                                    e.payload ?? '',
-                                    maxLines: 1,
-                                    overflow: TextOverflow.ellipsis,
-                                  ),
-                                  trailing: Text(
-                                    formatRelativeTime(e.createdAt),
-                                    style: Theme.of(context).textTheme.bodySmall,
-                                  ),
-                                );
-                              },
+                              itemBuilder: (context, index) => _eventRow(context, _events[index]),
                             ),
-                    ),
-                    SafeArea(
-                      top: false,
-                      child: Padding(
-                        padding: const EdgeInsets.all(8),
-                        child: Row(
-                          crossAxisAlignment: CrossAxisAlignment.end,
-                          children: [
-                            Expanded(
-                              child: TextField(
-                                controller: _promptController,
-                                maxLength: 8000,
-                                maxLines: 4,
-                                minLines: 1,
-                                decoration: const InputDecoration(hintText: 'Prompt'),
+                      if (_events.isNotEmpty)
+                        Positioned(
+                          right: 14,
+                          bottom: 14,
+                          child: GestureDetector(
+                            onTap: _jumpToNewest,
+                            child: Container(
+                              padding: const EdgeInsets.symmetric(horizontal: 11, vertical: 6),
+                              decoration: BoxDecoration(
+                                color: tokens.accent,
+                                borderRadius: BorderRadius.circular(999),
+                                boxShadow: [
+                                  BoxShadow(
+                                    color: Colors.black.withValues(alpha: 0.35),
+                                    blurRadius: 16,
+                                    offset: const Offset(0, 6),
+                                  ),
+                                ],
+                              ),
+                              child: Text(
+                                '↑ Newest',
+                                style: hubSans(
+                                  size: 11,
+                                  weight: FontWeight.w700,
+                                  color: tokens.accentInk,
+                                ),
                               ),
                             ),
-                            IconButton(
-                              icon: _sending
-                                  ? const SizedBox(
-                                      width: 20,
-                                      height: 20,
-                                      child: CircularProgressIndicator(strokeWidth: 2),
-                                    )
-                                  : const Icon(Icons.send),
-                              onPressed: _sending ? null : _send,
-                            ),
-                          ],
+                          ),
                         ),
-                      ),
-                    ),
-                  ],
+                    ],
+                  ),
                 ),
+                _composer(context),
+              ],
+            ),
     );
   }
 }
