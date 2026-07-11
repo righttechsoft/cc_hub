@@ -60,7 +60,7 @@ class _AppRootState extends State<AppRoot> {
       builder: (context, snapshot) {
         if (snapshot.connectionState != ConnectionState.done) {
           return MaterialApp(
-            title: 'cc_hub',
+            title: 'CC Hub',
             theme: buildTheme(dark: false),
             darkTheme: buildTheme(dark: true),
             themeMode: themeMode,
@@ -70,7 +70,7 @@ class _AppRootState extends State<AppRoot> {
         final settings = snapshot.data;
         if (settings == null) {
           return MaterialApp(
-            title: 'cc_hub',
+            title: 'CC Hub',
             theme: buildTheme(dark: false),
             darkTheme: buildTheme(dark: true),
             themeMode: themeMode,
@@ -147,7 +147,7 @@ class _HubServicesRootState extends State<_HubServicesRoot> with WidgetsBindingO
         ChangeNotifierProvider<HubStore>.value(value: _store),
       ],
       child: MaterialApp(
-        title: 'cc_hub',
+        title: 'CC Hub',
         theme: buildTheme(dark: false),
         darkTheme: buildTheme(dark: true),
         themeMode: themeMode,
