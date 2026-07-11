@@ -416,7 +416,9 @@ class _SessionDetailScreenState extends State<SessionDetailScreen> {
     final liveStatus = store.sessions[widget.sessionId]?.status ?? session?.status;
 
     return Scaffold(
-      body: _loading
+      body: SafeArea(
+        bottom: false, // the prompt bar below has its own SafeArea
+        child: _loading
           ? const Center(child: CircularProgressIndicator())
           : _loadError != null
           ? Center(
@@ -478,6 +480,7 @@ class _SessionDetailScreenState extends State<SessionDetailScreen> {
                 _composer(context),
               ],
             ),
+      ),
     );
   }
 }

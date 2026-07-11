@@ -81,32 +81,125 @@ class _HomeScreenState extends State<HomeScreen> {
         color = tokens.stEnded;
         break;
     }
-    return Container(
-      margin: const EdgeInsets.only(right: 4),
-      padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 3),
-      decoration: BoxDecoration(
-        border: Border.all(color: tokens.border),
-        borderRadius: BorderRadius.circular(kRadiusChip),
-      ),
-      child: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Container(
-            width: 6,
-            height: 6,
-            decoration: BoxDecoration(
-              color: color,
-              shape: BoxShape.circle,
-              boxShadow: [BoxShadow(color: color, blurRadius: 6)],
+    return GestureDetector(
+      behavior: HitTestBehavior.opaque,
+      onTap: () => _showConnectionDetails(context, connection),
+      child: Container(
+        margin: const EdgeInsets.only(right: 4),
+        padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 3),
+        decoration: BoxDecoration(
+          border: Border.all(color: tokens.border),
+          borderRadius: BorderRadius.circular(kRadiusChip),
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Container(
+              width: 6,
+              height: 6,
+              decoration: BoxDecoration(
+                color: color,
+                shape: BoxShape.circle,
+                boxShadow: [BoxShadow(color: color, blurRadius: 6)],
+              ),
             ),
-          ),
-          const SizedBox(width: 4),
-          Text(
-            label,
-            style: hubMono(size: 10, weight: FontWeight.w600, color: color, letterSpacing: 0.5),
-          ),
-        ],
+            const SizedBox(width: 4),
+            Text(
+              label,
+              style: hubMono(size: 10, weight: FontWeight.w600, color: color, letterSpacing: 0.5),
+            ),
+          ],
+        ),
       ),
+    );
+  }
+
+  /// Opens a dialog explaining WHY the pill says OFFLINE — last error per
+  /// base (LAN/relay), live-updating while open.
+  void _showConnectionDetails(BuildContext context, ConnectionManager connection) {
+    showDialog<void>(
+      context: context,
+      builder: (dialogContext) {
+        final tokens = dialogContext.tokens;
+        return AlertDialog(
+          title: const Text('Connection'),
+          content: AnimatedBuilder(
+            animation: connection,
+            builder: (context, _) {
+              final blocks = <Widget>[];
+              var anyAuthError = false;
+              for (var i = 0; i < connection.bases.length; i++) {
+                final isActive = connection.activeIndex == i && connection.wsStatus == WsStatus.up;
+                final labelText = i == 0 ? 'LAN' : 'RELAY';
+                final labelColor = i == 0 ? tokens.stRunning : tokens.accent;
+                final err = connection.baseError(i);
+                if (err != null && err.message.contains('401')) anyAuthError = true;
+
+                final String statusText;
+                final Color statusColor;
+                if (err != null) {
+                  final at = err.at;
+                  final hh = at.hour.toString().padLeft(2, '0');
+                  final mm = at.minute.toString().padLeft(2, '0');
+                  final ss = at.second.toString().padLeft(2, '0');
+                  statusText = '⚠ ${err.message} · $hh:$mm:$ss';
+                  statusColor = tokens.stEnded;
+                } else if (isActive) {
+                  statusText = 'ok';
+                  statusColor = tokens.stRunning;
+                } else {
+                  statusText = '—';
+                  statusColor = tokens.faint;
+                }
+
+                blocks.add(
+                  Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        '$labelText${isActive ? ' · ACTIVE' : ''}',
+                        style: hubMono(size: 11, weight: FontWeight.w700, color: labelColor),
+                      ),
+                      Text(
+                        connection.bases[i],
+                        softWrap: true,
+                        style: hubMono(size: 10, color: tokens.dim),
+                      ),
+                      Text(statusText, style: hubMono(size: 10, color: statusColor)),
+                    ],
+                  ),
+                );
+                blocks.add(const SizedBox(height: 10));
+              }
+              if (anyAuthError) {
+                blocks.add(
+                  Text(
+                    'token mismatch — fix in Settings (⋮)',
+                    style: hubMono(size: 10, color: tokens.stWarn),
+                  ),
+                );
+              }
+              return Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: blocks,
+              );
+            },
+          ),
+          actions: [
+            TextButton(
+              onPressed: () {
+                connection.preferLan();
+                connection.disposeWs();
+                connection.connectWs();
+                Navigator.pop(dialogContext);
+              },
+              child: const Text('Retry now'),
+            ),
+            TextButton(onPressed: () => Navigator.pop(dialogContext), child: const Text('Close')),
+          ],
+        );
+      },
     );
   }
 

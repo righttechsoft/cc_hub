@@ -10,6 +10,14 @@ import 'settings.dart';
 
 enum WsStatus { connecting, up, down }
 
+/// Last error seen for a given base (LAN or relay), for surfacing "why
+/// OFFLINE" in the UI.
+class BaseError {
+  final String message;
+  final DateTime at;
+  BaseError(this.message) : at = DateTime.now();
+}
+
 /// Non-2xx response with a parsed `{error:{code,message}}` envelope.
 /// [statusCode] is the HTTP status (e.g. 409, 400) so callers can branch on
 /// it without string-matching [code], which is the server's own error code.
@@ -137,6 +145,8 @@ class ConnectionManager extends ChangeNotifier {
   bool _wsClosing = true; // until connectWs() is called
   DateTime? _lastInboundFrameAt;
 
+  late final List<BaseError?> _baseErrors = List<BaseError?>.filled(bases.length, null);
+
   /// Every decoded WS frame (`{type, data}`), including `hello`/`pong`.
   void Function(Map<String, dynamic> frame)? onFrame;
 
@@ -164,6 +174,27 @@ class ConnectionManager extends ChangeNotifier {
   void preferLan() {
     if (_activeIndex != 0) {
       _activeIndex = 0;
+      notifyListeners();
+    }
+  }
+
+  /// Last recorded error for [bases]\[index\], if any.
+  BaseError? baseError(int index) => _baseErrors[index];
+
+  /// Records (with a fresh timestamp) the latest failure for a base. Only
+  /// notifies listeners when the message actually changed, so backoff loops
+  /// retrying the same error don't trigger a rebuild storm.
+  void _recordBaseError(int index, String message) {
+    final previous = _baseErrors[index];
+    _baseErrors[index] = BaseError(message);
+    if (previous == null || previous.message != message) {
+      notifyListeners();
+    }
+  }
+
+  void _clearBaseError(int index) {
+    if (_baseErrors[index] != null) {
+      _baseErrors[index] = null;
       notifyListeners();
     }
   }
@@ -231,14 +262,18 @@ class ConnectionManager extends ChangeNotifier {
     try {
       response = await _rawSend(method, uri, headers, body).timeout(timeout);
     } on TimeoutException {
+      _recordBaseError(baseIndex, 'timed out after ${timeout.inSeconds}s');
       return _AttemptResult.failure(isTransportError: true, message: 'Timed out');
     } on SocketException catch (e) {
+      _recordBaseError(baseIndex, 'socket: ${e.message}');
       return _AttemptResult.failure(isTransportError: true, message: e.message);
     } on http.ClientException catch (e) {
+      _recordBaseError(baseIndex, e.message);
       return _AttemptResult.failure(isTransportError: true, message: e.message);
     }
 
     if (response.statusCode == 401) {
+      _recordBaseError(baseIndex, '401 unauthorized — check token');
       return _AttemptResult.failure(isAuthError: true, statusCode: 401, message: 'Unauthorized');
     }
 
@@ -253,6 +288,7 @@ class ConnectionManager extends ChangeNotifier {
     }
 
     if (response.statusCode >= 200 && response.statusCode < 300) {
+      _clearBaseError(baseIndex);
       return _AttemptResult.success(parsed ?? <String, dynamic>{});
     }
 
@@ -262,6 +298,10 @@ class ConnectionManager extends ChangeNotifier {
         ? (errorObj['message'] as String? ?? 'Request failed (${response.statusCode})')
         : 'Request failed (${response.statusCode})';
 
+    _recordBaseError(
+      baseIndex,
+      'HTTP ${response.statusCode}${errorCode != null ? ' $errorCode' : ''}: $errorMessage',
+    );
     return _AttemptResult.failure(
       statusCode: response.statusCode,
       errorCode: errorCode,
@@ -323,14 +363,16 @@ class ConnectionManager extends ChangeNotifier {
     final WebSocketChannel channel;
     try {
       channel = WebSocketChannel.connect(Uri.parse(wsUrlFor(bases[baseIndex], settings.token)));
-    } catch (_) {
+    } catch (e) {
+      _recordBaseError(baseIndex, 'ws connect: $e');
       _scheduleReconnect(baseIndex, closeCode: null);
       return;
     }
     _ws = channel;
-    unawaited(channel.ready.catchError((Object _) {
+    unawaited(channel.ready.catchError((Object e) {
       // Failure also surfaces via the stream's onError/onDone; swallowing here
       // only prevents an unhandled async exception.
+      _recordBaseError(baseIndex, 'ws handshake: $e');
     }));
     _lastInboundFrameAt = DateTime.now(); // start the dead-man window now
 
@@ -343,8 +385,9 @@ class ConnectionManager extends ChangeNotifier {
         if (generation != _wsGeneration) return;
         _handleWsClosed(baseIndex, channel.closeCode);
       },
-      onError: (_) {
+      onError: (e) {
         if (generation != _wsGeneration) return;
+        _recordBaseError(baseIndex, 'ws error: $e');
         _handleWsClosed(baseIndex, channel.closeCode);
       },
       cancelOnError: true,
@@ -387,6 +430,7 @@ class ConnectionManager extends ChangeNotifier {
       if (_activeIndex != baseIndex) {
         _activeIndex = baseIndex; // WS is the best liveness signal
       }
+      _clearBaseError(baseIndex);
       notifyListeners();
     }
 
@@ -409,6 +453,13 @@ class ConnectionManager extends ChangeNotifier {
     _pingTimer?.cancel();
     _watchdogTimer?.cancel();
     _ws = null;
+    if (closeCode != null && closeCode != 1012) {
+      // Don't clobber a fresher error already recorded by onError this tick.
+      final existing = _baseErrors[baseIndex];
+      if (existing == null || DateTime.now().difference(existing.at) > const Duration(seconds: 1)) {
+        _recordBaseError(baseIndex, 'ws closed (code $closeCode)');
+      }
+    }
     if (_wsStatus != WsStatus.down) {
       _wsStatus = WsStatus.down;
       notifyListeners();
