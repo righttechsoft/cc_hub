@@ -12,12 +12,11 @@ platform :ios do
     )
 
     setup_ci                          # throwaway keychain for the signing identity
-    ENV["MATCH_READONLY"] = "false"   # setup_ci forces this true; undo so first run can CREATE the cert
 
     match(
       type: "appstore",
       app_identifier: APP_IDS,
-      readonly: false,                # first run creates the cert; flip to true once it exists
+      readonly: true,                 # cert/profile created on first run (v1.0.1); set false again to regenerate
       api_key: api_key
     )
 
