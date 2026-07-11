@@ -207,6 +207,65 @@ describe('startDesktopNotifier', () => {
     dn.stop();
   });
 
+  it('suppresses an idle_prompt Notification while the session is still mid-turn (active)', () => {
+    const db = buildDb();
+    insertSession(db, 'proj', 'sess-1'); // upsertFromHook inserts status 'active'
+    const bus = new HubBus();
+    const log = silentLogger();
+    const dn = startDesktopNotifier({ db, bus, config: buildConfig(), log });
+
+    bus.emit({
+      type: 'session_event',
+      sessionId: 'sess-1',
+      eventType: 'Notification',
+      payload: { notification_type: 'idle_prompt', message: 'Claude is waiting for your input' },
+      createdAt: Date.now(),
+    });
+
+    expect(notifyMock).not.toHaveBeenCalled();
+    expect(log.debug).toHaveBeenCalledTimes(1);
+    dn.stop();
+  });
+
+  it('toasts an idle_prompt Notification once the session has gone idle (Stop fired)', () => {
+    const db = buildDb();
+    insertSession(db, 'proj', 'sess-1');
+    sessionsRepo.setStatus(db, 'sess-1', 'idle', Date.now());
+    const bus = new HubBus();
+    const dn = startDesktopNotifier({ db, bus, config: buildConfig(), log: silentLogger() });
+
+    bus.emit({
+      type: 'session_event',
+      sessionId: 'sess-1',
+      eventType: 'Notification',
+      payload: { notification_type: 'idle_prompt', message: 'Claude is waiting for your input' },
+      createdAt: Date.now(),
+    });
+
+    expect(notifyMock).toHaveBeenCalledTimes(1);
+    const [opts] = notifyMock.mock.calls[0] as [{ title: string; message?: string }];
+    expect(opts.title).toBe('proj needs input');
+    dn.stop();
+  });
+
+  it('still toasts a permission_prompt Notification mid-turn (only idle_prompt is validated)', () => {
+    const db = buildDb();
+    insertSession(db, 'proj', 'sess-1'); // status 'active'
+    const bus = new HubBus();
+    const dn = startDesktopNotifier({ db, bus, config: buildConfig(), log: silentLogger() });
+
+    bus.emit({
+      type: 'session_event',
+      sessionId: 'sess-1',
+      eventType: 'Notification',
+      payload: { notification_type: 'permission_prompt', message: 'Claude needs your permission' },
+      createdAt: Date.now(),
+    });
+
+    expect(notifyMock).toHaveBeenCalledTimes(1);
+    dn.stop();
+  });
+
   it('does not toast on a Stop session_event by default (turnEnd off)', () => {
     const db = buildDb();
     insertSession(db, 'proj', 'sess-1');

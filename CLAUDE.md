@@ -102,7 +102,7 @@ REST under `/api/v1`: health, sessions (+events, +prompt, +auto-continue), permi
 | Event | Toggle (default) | Toast |
 |---|---|---|
 | `permission_request` | `permissionRequests` (`true`) | `<instance> — permission` / `<tool_name>: <first 80 chars of tool_input>` |
-| `session_event` eventType `'Notification'` | `needsInput` (`true`) | `<instance> needs input` / payload's `message` field if present |
+| `session_event` eventType `'Notification'` | `needsInput` (`true`) | `<instance> needs input` / payload's `message` field if present. **Validated**: `notification_type === 'idle_prompt'` on a still-`active` session is suppressed (CC fires idle_prompt mid-turn too; a genuine idle wait always follows Stop → status `'idle'`). `permission_prompt` is never suppressed — mid-turn is exactly when it's real. |
 | `session_event` eventType `'Stop'` | `turnEnd` (`false` — noisy) | `<instance> finished a turn` |
 | `limit_state` entering `'limited'`, or back to `'ok'` from a limited episode | `limit` (`true`) | `cc_hub — usage limit` / reached or reset |
 | everything else (`permission_decided`, `message`, `session_status`, other `session_event` types) | — | never toasts |

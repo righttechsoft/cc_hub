@@ -106,8 +106,18 @@ export function startDesktopNotifier(deps: DesktopNotifierDeps): DesktopNotifier
       case 'session_event': {
         if (e.eventType === 'Notification') {
           if (!config.notifications.needsInput) return;
-          const name = resolveInstanceName(db, e.sessionId);
-          const message = isRecord(e.payload) && typeof e.payload.message === 'string' ? e.payload.message : undefined;
+          const sess = sessionsRepo.getJoined(db, e.sessionId);
+          const payload = isRecord(e.payload) ? e.payload : {};
+          // CC fires idle_prompt ("Claude is waiting for your input") during long turns too. A
+          // genuine idle wait always follows a Stop hook, which flips status to 'idle' long before
+          // the 60s idle notification — so idle_prompt on a still-'active' session is a false
+          // alarm. permission_prompt is left alone: mid-turn is exactly when it's real.
+          if (payload.notification_type === 'idle_prompt' && sess?.status === 'active') {
+            log.debug('desktopNotifier: suppressed idle_prompt toast, session mid-turn', { sessionId: e.sessionId });
+            return;
+          }
+          const name = sess?.instance_name ?? e.sessionId.slice(0, 8);
+          const message = typeof payload.message === 'string' ? payload.message : undefined;
           toast(log, `${name} needs input`, message);
           return;
         }
