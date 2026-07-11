@@ -1,0 +1,2 @@
+app_identifier("com.righttechsoft.ccHubMobile")
+# apple_id / team_id not needed when using ASC API key

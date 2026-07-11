@@ -1,0 +1,56 @@
+default_platform(:ios)
+APP_IDS = ["com.righttechsoft.ccHubMobile"].freeze  # keep in sync with Matchfile + ExportOptions.plist
+
+platform :ios do
+  desc "Build the Flutter app and upload to TestFlight"
+  lane :beta do
+    api_key = app_store_connect_api_key(
+      key_id: ENV.fetch("ASC_KEY_ID"),
+      issuer_id: ENV.fetch("ASC_ISSUER_ID"),
+      key_content: ENV.fetch("ASC_KEY_P8_BASE64"),
+      is_key_content_base64: true
+    )
+
+    setup_ci                          # throwaway keychain for the signing identity
+    ENV["MATCH_READONLY"] = "false"   # setup_ci forces this true; undo so first run can CREATE the cert
+
+    match(
+      type: "appstore",
+      app_identifier: APP_IDS,
+      readonly: false,                # first run creates the cert; flip to true once it exists
+      api_key: api_key
+    )
+
+    # Absolute paths only: fastlane's CWD is fastlane/, but `flutter build ipa` runs
+    # xcodebuild from inside ios/. Any relative path breaks. Anchor everything to fastlane dir.
+    build_number = ENV["BUILD_NUMBER"] || "1"
+    fastlane_dir = Dir.pwd
+    export_opts  = File.expand_path("../ExportOptions.plist", fastlane_dir)
+    project_dir  = File.expand_path("../..", fastlane_dir)
+
+    # Flutter's default Runner target uses AUTOMATIC signing (no team) — the archive step
+    # then can't find a cert on CI. Force MANUAL signing with the match cert + profile.
+    update_code_signing_settings(
+      path: File.expand_path("../Runner.xcodeproj", fastlane_dir),
+      use_automatic_signing: false,
+      team_id: "CRRN9GCAL9",
+      code_sign_identity: "Apple Distribution",
+      bundle_identifier: "com.righttechsoft.ccHubMobile",
+      profile_name: "match AppStore com.righttechsoft.ccHubMobile",
+      targets: ["Runner"]
+    )
+
+    sh("cd '#{project_dir}' && flutter build ipa --release " \
+       "--build-number=#{build_number} " \
+       "--export-options-plist='#{export_opts}'")
+
+    ipa = Dir[File.join(project_dir, "build/ios/ipa/*.ipa")].first
+    UI.user_error!("No IPA produced") if ipa.nil?
+
+    upload_to_testflight(
+      api_key: api_key,
+      ipa: ipa,
+      skip_waiting_for_build_processing: true
+    )
+  end
+end

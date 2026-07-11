@@ -1,0 +1,5 @@
+git_url("https://github.com/righttechsoft/ios-certificates.git")
+storage_mode("git")
+type("appstore")
+# EVERY bundle id that ships in the build must be listed (app + each extension/watch target).
+app_identifier(["com.righttechsoft.ccHubMobile"])

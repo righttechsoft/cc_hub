@@ -58,5 +58,16 @@ These are stored on-device and can be changed later from the overflow menu
 flutter build apk --release
 ```
 
-iOS builds are not set up locally (this workspace is Windows-only) — planned
-via CI later.
+iOS builds happen in CI only (this workspace is Windows-only) — see below.
+
+## Release (iOS TestFlight)
+
+Pushing a `v*` tag (or manual dispatch) runs `.github/workflows/ios-testflight.yml`:
+macos runner → `flutter build ipa` → fastlane `beta` lane → TestFlight upload
+for `com.righttechsoft.ccHubMobile` (ASC app "CC Hub", team `CRRN9GCAL9`).
+Signing via fastlane match against `righttechsoft/ios-certificates`; build
+number = workflow run number, version comes from `pubspec.yaml`.
+
+Required repo secrets (same values as beastmodebuddy's, reusable team-wide):
+`ASC_KEY_ID`, `ASC_ISSUER_ID`, `ASC_KEY_P8_BASE64`, `MATCH_PASSWORD`,
+`MATCH_GIT_BASIC_AUTHORIZATION`. Fastlane config lives in `ios/fastlane/`.
