@@ -71,6 +71,10 @@ import UserNotifications
     willPresent notification: UNNotification,
     withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void
   ) {
-    completionHandler([.banner, .sound])
+    if #available(iOS 14.0, *) {
+      completionHandler([.banner, .sound])
+    } else {
+      completionHandler([.alert, .sound])
+    }
   }
 }
