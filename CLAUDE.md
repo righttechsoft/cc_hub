@@ -59,6 +59,8 @@ Athen (= *Athenaeum*, a library of collected knowledge) is the machine-wide memo
 | Session start | Banner with unread count (not marked read) |
 | **Not mid-turn** (idle, ended, or no session ever) | **chatDelivery starts a brand-new headless session in the instance's cwd** (below) |
 
+The interactive-path templates (`messageFormat.ts`) explicitly instruct the agent to show the user each message (sender + full text) and state what it's doing about it — injected context and Stop block reasons are invisible in the terminal UI, so without this the agent could act on mail the human never saw.
+
 ### Chat delivery via fresh spawn (`src/chat/chatDelivery.ts`)
 
 Watcher-style loop (recursive setTimeout, `ticking` guard, `pokeNow()`, `stop()`). `chat_send` (MCP) and `POST /api/v1/messages` both call `pokeNow()` after inserting the message (optional `pokeChatDelivery` dep wired in `index.ts`), so recipients get mail near-instantly instead of on the next poll tick. Each tick (default 30s), for every instance (`instancesRepo.list`) with unread mail:

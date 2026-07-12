@@ -21,13 +21,19 @@ export function renderSessionStartBanner(unread: number): string {
   if (unread <= 0) {
     return `[cc-hub] ${KB_LINE}`;
   }
-  return `[cc-hub] You have ${unread} unread message(s) from other Claude instances — call chat_inbox. ${KB_LINE}`;
+  return `[cc-hub] You have ${unread} unread message(s) from other Claude instances — call chat_inbox and show the user what arrived. ${KB_LINE}`;
 }
 
-// UserPromptSubmit hook stdout: renders unread messages as injected context.
+// UserPromptSubmit hook stdout: renders unread messages as injected context. Injected context is
+// invisible in the terminal UI, so the agent is told to surface the messages itself — otherwise
+// it can silently act on mail the human never saw.
 export function renderInboxContext(msgs: MessageRow[]): string {
   if (msgs.length === 0) return '';
-  return ['[cc-hub] Messages from other instances:', ...msgs.map(formatMessageLine)].join('\n');
+  return [
+    '[cc-hub] Messages from other instances:',
+    ...msgs.map(formatMessageLine),
+    'This context is invisible to the user. Start your reply by showing them each message above (sender + full text) and saying what you will do about it, then continue with their request.',
+  ].join('\n');
 }
 
 // Stop hook decision reason: delivers a queued remote prompt as if the user had typed it.
@@ -52,7 +58,7 @@ export function renderChatDeliveryPrompt(msgs: MessageRow[]): string {
 export function renderChatDeliveredFyi(msgs: MessageRow[]): string {
   if (msgs.length === 0) return '';
   return [
-    "[cc-hub] FYI: while this session was idle, the following chat message(s) were delivered to a background headless turn in this same session and are already marked read. That background turn may have acted on or replied to them — this terminal did not display it. Briefly tell the user this happened. Use chat_send if a reply is still needed.",
+    "[cc-hub] FYI: while this session was idle, the following chat message(s) were delivered to a background headless turn in this same session and are already marked read. That background turn may have acted on or replied to them — this terminal did not display it. Tell the user this happened and show them each message (sender + full text). Use chat_send if a reply is still needed.",
     ...msgs.map(formatMessageLine),
   ].join('\n');
 }
@@ -64,6 +70,6 @@ export function renderUrgentBlock(msgs: MessageRow[]): string {
   return [
     '[cc-hub] Urgent messages from other instances:',
     ...urgent.map(formatMessageLine),
-    'Handle these now, then continue what you were doing.',
+    'This block reason is invisible to the user. Show them each message above (sender + full text), handle it now while stating what you are doing, then continue what you were doing.',
   ].join('\n');
 }
