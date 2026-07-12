@@ -157,10 +157,10 @@ class _SessionDetailScreenState extends State<SessionDetailScreen> {
       );
     } on ApiException catch (e) {
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(e.message)));
+      showErrorSnack(context, e.message);
     } catch (e) {
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('$e')));
+      showErrorSnack(context, '$e');
     } finally {
       if (mounted) setState(() => _sending = false);
     }
@@ -190,7 +190,10 @@ class _SessionDetailScreenState extends State<SessionDetailScreen> {
       });
     } on ApiException catch (e) {
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(e.message)));
+      showErrorSnack(context, e.message);
+    } catch (e) {
+      if (!mounted) return;
+      showErrorSnack(context, '$e');
     } finally {
       if (mounted) setState(() => _autoContinueBusy = false);
     }
@@ -424,7 +427,7 @@ class _SessionDetailScreenState extends State<SessionDetailScreen> {
           ? Center(
               child: Text(
                 'Failed to load: $_loadError',
-                style: hubSans(size: 13, color: tokens.dim),
+                style: hubSans(size: 13, color: tokens.stEnded),
               ),
             )
           : Column(

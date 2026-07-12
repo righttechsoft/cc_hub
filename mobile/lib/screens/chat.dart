@@ -22,6 +22,7 @@ class _ChatScreenState extends State<ChatScreen> {
   bool _urgent = false;
   bool _sending = false;
   bool _loadedHistory = false;
+  String? _historyError;
 
   // Messages this screen itself sent this session — rendered as "own"
   // (right/accent) bubbles. cc_hub's chat is N-instance broadcast/direct
@@ -41,8 +42,8 @@ class _ChatScreenState extends State<ChatScreen> {
       final messages = await context.read<ApiClient>().listMessages(limit: 50);
       if (!mounted) return;
       context.read<HubStore>().mergeMessages(messages);
-    } catch (_) {
-      // Best-effort; live messages still arrive via WS.
+    } catch (e) {
+      if (mounted) setState(() => _historyError = '$e');
     } finally {
       if (mounted) setState(() => _loadedHistory = true);
     }
@@ -60,7 +61,10 @@ class _ChatScreenState extends State<ChatScreen> {
       setState(() => _urgent = false);
     } on ApiException catch (e) {
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(e.message)));
+      showErrorSnack(context, e.message);
+    } catch (e) {
+      if (!mounted) return;
+      showErrorSnack(context, '$e');
     } finally {
       if (mounted) setState(() => _sending = false);
     }
@@ -172,7 +176,21 @@ class _ChatScreenState extends State<ChatScreen> {
             child: !_loadedHistory && messages.isEmpty
                 ? const Center(child: CircularProgressIndicator())
                 : messages.isEmpty
-                ? Center(child: Text('No messages yet', style: hubSans(size: 13, color: tokens.dim)))
+                ? Center(
+                    child: Padding(
+                      padding: const EdgeInsets.symmetric(horizontal: 24),
+                      child: Text(
+                        _historyError != null
+                            ? 'Couldn\'t load history: $_historyError'
+                            : 'No messages yet',
+                        textAlign: TextAlign.center,
+                        style: hubSans(
+                          size: 13,
+                          color: _historyError != null ? tokens.stEnded : tokens.dim,
+                        ),
+                      ),
+                    ),
+                  )
                 : ListView.separated(
                     reverse: true,
                     padding: const EdgeInsets.fromLTRB(14, 8, 14, 14),

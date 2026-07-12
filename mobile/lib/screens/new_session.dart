@@ -3,6 +3,7 @@ import 'package:provider/provider.dart';
 
 import '../api_client.dart';
 import '../connection.dart';
+import '../theme.dart';
 
 class NewSessionScreen extends StatefulWidget {
   const NewSessionScreen({super.key});
@@ -31,11 +32,10 @@ class _NewSessionScreenState extends State<NewSessionScreen> {
       );
     } on ApiException catch (e) {
       if (!mounted) return;
-      final text = e.statusCode == 409 ? 'Runner at capacity, try later' : e.message;
-      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(text)));
+      showErrorSnack(context, e.statusCode == 409 ? 'Runner at capacity, try later' : e.message);
     } catch (e) {
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('$e')));
+      showErrorSnack(context, '$e');
     } finally {
       if (mounted) setState(() => _submitting = false);
     }

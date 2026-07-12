@@ -35,9 +35,9 @@ class _KbScreenState extends State<KbScreen> {
         _results = results;
         _searched = true;
       });
-    } on ApiException catch (e) {
+    } catch (e) {
       if (!mounted) return;
-      setState(() => _error = e.message);
+      setState(() => _error = e is ApiException ? e.message : '$e');
     } finally {
       if (mounted) setState(() => _searching = false);
     }
@@ -76,9 +76,9 @@ class _KbScreenState extends State<KbScreen> {
           ),
         ),
       );
-    } on ApiException catch (e) {
+    } catch (e) {
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(e.message)));
+      showErrorSnack(context, e is ApiException ? e.message : '$e');
     }
   }
 
@@ -130,11 +130,9 @@ class _KbScreenState extends State<KbScreen> {
                   tags: tagsController.text.trim().isEmpty ? null : tagsController.text.trim(),
                 );
                 if (dialogContext.mounted) Navigator.of(dialogContext).pop(true);
-              } on ApiException catch (e) {
+              } catch (e) {
                 if (dialogContext.mounted) {
-                  ScaffoldMessenger.of(
-                    dialogContext,
-                  ).showSnackBar(SnackBar(content: Text(e.message)));
+                  showErrorSnack(dialogContext, e is ApiException ? e.message : '$e');
                 }
               }
             },

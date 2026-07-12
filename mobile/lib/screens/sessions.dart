@@ -43,8 +43,14 @@ class SessionsScreen extends StatelessWidget {
     final connection = context.read<ConnectionManager>();
     final api = context.read<ApiClient>();
     connection.preferLan();
-    final list = await api.listSessions();
-    if (context.mounted) context.read<HubStore>().setSessions(list);
+    try {
+      final list = await api.listSessions();
+      if (context.mounted) context.read<HubStore>().setSessions(list);
+    } catch (e) {
+      if (context.mounted) {
+        showErrorSnack(context, e is ApiException ? e.message : '$e');
+      }
+    }
   }
 
   Widget _row(BuildContext context, Session s) {

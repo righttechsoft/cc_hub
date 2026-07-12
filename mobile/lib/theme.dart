@@ -284,6 +284,19 @@ ThemeData buildTheme({required bool dark}) {
   );
 }
 
+/// Red, longer-lived snackbar for failures, so errors look unmistakably
+/// different from info toasts.
+void showErrorSnack(BuildContext context, String message) {
+  final tokens = context.tokens;
+  ScaffoldMessenger.of(context).showSnackBar(
+    SnackBar(
+      content: Text(message, style: hubSans(size: 12, color: Colors.white)),
+      backgroundColor: tokens.stEnded,
+      duration: const Duration(seconds: 6),
+    ),
+  );
+}
+
 /// Convenience accessor: `context.tokens.accent` instead of
 /// `Theme.of(context).extension<HubTokens>()!.accent`.
 extension HubThemeX on BuildContext {

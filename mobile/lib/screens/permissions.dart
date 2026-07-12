@@ -28,6 +28,7 @@ class _PermissionsScreenState extends State<PermissionsScreen> {
   Timer? _ticker;
   List<Permission> _history = [];
   bool _loadingHistory = true;
+  String? _historyError;
   final Map<int, TextEditingController> _messageControllers = {};
 
   @override
@@ -48,8 +49,13 @@ class _PermissionsScreenState extends State<PermissionsScreen> {
           ..sort((a, b) => (b.decidedAt ?? b.createdAt).compareTo(a.decidedAt ?? a.createdAt));
         _loadingHistory = false;
       });
-    } catch (_) {
-      if (mounted) setState(() => _loadingHistory = false);
+    } catch (e) {
+      if (mounted) {
+        setState(() {
+          _historyError = '$e';
+          _loadingHistory = false;
+        });
+      }
     }
   }
 
@@ -75,8 +81,10 @@ class _PermissionsScreenState extends State<PermissionsScreen> {
           ).showSnackBar(const SnackBar(content: Text('already decided')));
         }
       } else if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(e.message)));
+        showErrorSnack(context, e.message);
       }
+    } catch (e) {
+      if (mounted) showErrorSnack(context, '$e');
     }
   }
 
@@ -190,6 +198,11 @@ class _PermissionsScreenState extends State<PermissionsScreen> {
           const SizedBox(height: 8),
           if (_loadingHistory)
             const Center(child: CircularProgressIndicator())
+          else if (_historyError != null)
+            Text(
+              'Couldn\'t load history: $_historyError',
+              style: hubSans(size: 12, color: tokens.stEnded),
+            )
           else if (_history.isEmpty)
             Text('No decided permissions yet', style: hubSans(size: 13, color: tokens.dim))
           else

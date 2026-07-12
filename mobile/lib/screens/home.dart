@@ -52,8 +52,10 @@ class _HomeScreenState extends State<HomeScreen> {
           ).showSnackBar(const SnackBar(content: Text('already decided')));
         }
       } else if (context.mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(e.message)));
+        showErrorSnack(context, e.message);
       }
+    } catch (e) {
+      if (context.mounted) showErrorSnack(context, '$e');
     }
   }
 
@@ -200,6 +202,43 @@ class _HomeScreenState extends State<HomeScreen> {
           ],
         );
       },
+    );
+  }
+
+  /// Persistent banner shown while the hub is unreachable — puts the actual
+  /// per-base error text on screen instead of hiding it behind the pill tap.
+  Widget _offlineBanner(BuildContext context, ConnectionManager connection) {
+    final tokens = context.tokens;
+    final lines = <String>[];
+    for (var i = 0; i < connection.bases.length; i++) {
+      final err = connection.baseError(i);
+      if (err != null) lines.add('${i == 0 ? 'LAN' : 'RELAY'}: ${err.message}');
+    }
+    return GestureDetector(
+      onTap: () => _showConnectionDetails(context, connection),
+      child: Container(
+        width: double.infinity,
+        margin: const EdgeInsets.fromLTRB(16, 8, 16, 0),
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+        decoration: BoxDecoration(
+          color: tokens.stEnded.withValues(alpha: 0.14),
+          border: Border.all(color: tokens.stEnded.withValues(alpha: 0.4)),
+          borderRadius: BorderRadius.circular(kRadiusCard),
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              'OFFLINE — hub unreachable',
+              style: hubSans(size: 12, weight: FontWeight.w700, color: tokens.stEnded),
+            ),
+            const SizedBox(height: 2),
+            Text(lines.join('\n'), style: hubMono(size: 10, color: tokens.stEnded)),
+            const SizedBox(height: 2),
+            Text('tap for details / retry', style: hubSans(size: 10, color: tokens.dim)),
+          ],
+        ),
+      ),
     );
   }
 
@@ -385,6 +424,9 @@ class _HomeScreenState extends State<HomeScreen> {
       ),
       body: Column(
         children: [
+          if (connection.wsStatus != WsStatus.up &&
+              List.generate(connection.bases.length, connection.baseError).any((e) => e != null))
+            _offlineBanner(context, connection),
           if (pending.isNotEmpty) _permissionBanner(context, store, pending),
           Expanded(child: IndexedStack(index: _selectedIndex, children: _tabs)),
         ],
