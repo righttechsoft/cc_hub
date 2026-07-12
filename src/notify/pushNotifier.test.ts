@@ -9,6 +9,11 @@ import { startPushNotifier } from './pushNotifier.js';
 import type { HubConfig, LimitStateRow, Logger, PermissionRow } from '../types.js';
 import type { ApnsSendResult } from './apns.js';
 
+const shouldNotifyIdlePromptMock = vi.fn<(...args: unknown[]) => Promise<boolean>>();
+vi.mock('./needsInputFilter.js', () => ({
+  shouldNotifyIdlePrompt: (...args: unknown[]) => shouldNotifyIdlePromptMock(...args),
+}));
+
 function buildDb(): Database.Database {
   const db = new Database(':memory:');
   runMigrations(db);
@@ -49,6 +54,8 @@ function buildConfig(opts?: Partial<HubConfig['notifications']>): HubConfig {
       turnEnd: false,
       limit: true,
       chatDelivery: true,
+      aiIdleFilter: false,
+      aiIdleFilterModel: 'claude-haiku-4-5',
       ...opts,
     },
     push: {
@@ -216,6 +223,69 @@ describe('startPushNotifier', () => {
     await tick();
 
     expect(sender.send).not.toHaveBeenCalled();
+    pn.stop();
+  });
+
+  it('suppresses an idle idle_prompt when aiIdleFilter is on and the filter resolves false', async () => {
+    const db = buildDb();
+    insertSession(db, 'proj', 'sess-1');
+    sessionsRepo.setStatus(db, 'sess-1', 'idle', Date.now());
+    pushTokensRepo.upsert(db, { token: 'aaaa1111', platform: 'ios', now: Date.now() });
+    shouldNotifyIdlePromptMock.mockResolvedValue(false);
+    const bus = new HubBus();
+    const sender = fakeSender();
+    const pn = startPushNotifier({
+      db,
+      bus,
+      config: buildConfig({ aiIdleFilter: true }),
+      log: silentLogger(),
+      away: fakeAway(true),
+      sender,
+    });
+
+    bus.emit({
+      type: 'session_event',
+      sessionId: 'sess-1',
+      eventType: 'Notification',
+      payload: { notification_type: 'idle_prompt', message: 'Claude is waiting for your input' },
+      createdAt: Date.now(),
+    });
+    await tick();
+
+    expect(shouldNotifyIdlePromptMock).toHaveBeenCalledTimes(1);
+    expect(sender.send).not.toHaveBeenCalled();
+    pn.stop();
+  });
+
+  it('pushes an idle idle_prompt when aiIdleFilter is on and the filter resolves true', async () => {
+    const db = buildDb();
+    insertSession(db, 'proj', 'sess-1');
+    sessionsRepo.setStatus(db, 'sess-1', 'idle', Date.now());
+    pushTokensRepo.upsert(db, { token: 'aaaa1111', platform: 'ios', now: Date.now() });
+    shouldNotifyIdlePromptMock.mockResolvedValue(true);
+    const bus = new HubBus();
+    const sender = fakeSender();
+    const pn = startPushNotifier({
+      db,
+      bus,
+      config: buildConfig({ aiIdleFilter: true }),
+      log: silentLogger(),
+      away: fakeAway(true),
+      sender,
+    });
+
+    bus.emit({
+      type: 'session_event',
+      sessionId: 'sess-1',
+      eventType: 'Notification',
+      payload: { notification_type: 'idle_prompt', message: 'Claude is waiting for your input' },
+      createdAt: Date.now(),
+    });
+    await tick();
+
+    expect(sender.send).toHaveBeenCalledTimes(1);
+    const [, title] = sender.send.mock.calls[0] as [string, string, string | undefined];
+    expect(title).toBe('proj needs input');
     pn.stop();
   });
 

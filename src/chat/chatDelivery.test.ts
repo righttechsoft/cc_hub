@@ -50,7 +50,16 @@ function buildConfig(opts?: Partial<HubConfig['chatDelivery']>): HubConfig {
       ...opts,
     },
     athen: { embeddings: false, model: 'Xenova/all-MiniLM-L6-v2' },
-    notifications: { enabled: false, permissionRequests: true, needsInput: true, turnEnd: false, limit: true, chatDelivery: true },
+    notifications: {
+      enabled: false,
+      permissionRequests: true,
+      needsInput: true,
+      turnEnd: false,
+      limit: true,
+      chatDelivery: true,
+      aiIdleFilter: false,
+      aiIdleFilterModel: 'claude-haiku-4-5',
+    },
     push: {
       enabled: false,
       awayThresholdMinutes: 3,

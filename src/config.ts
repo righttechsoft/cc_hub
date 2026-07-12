@@ -40,6 +40,8 @@ const defaults: HubConfig = {
     turnEnd: false,
     limit: true,
     chatDelivery: true,
+    aiIdleFilter: false,
+    aiIdleFilterModel: 'claude-haiku-4-5',
   },
   push: {
     enabled: false,

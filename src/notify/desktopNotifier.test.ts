@@ -11,7 +11,16 @@ vi.mock('node-notifier', () => ({
   default: { notify: (...args: unknown[]) => notifyMock(...args) },
 }));
 
+const shouldNotifyIdlePromptMock = vi.fn<(...args: unknown[]) => Promise<boolean>>();
+vi.mock('./needsInputFilter.js', () => ({
+  shouldNotifyIdlePrompt: (...args: unknown[]) => shouldNotifyIdlePromptMock(...args),
+}));
+
 const { startDesktopNotifier, formatToolInput } = await import('./desktopNotifier.js');
+
+async function tick(): Promise<void> {
+  await new Promise((r) => setTimeout(r, 0));
+}
 
 function buildDb(): Database.Database {
   const db = new Database(':memory:');
@@ -53,6 +62,8 @@ function buildConfig(opts?: Partial<HubConfig['notifications']>): HubConfig {
       turnEnd: false,
       limit: true,
       chatDelivery: true,
+      aiIdleFilter: false,
+      aiIdleFilterModel: 'claude-haiku-4-5',
       ...opts,
     },
     push: {
@@ -142,6 +153,7 @@ describe('formatToolInput', () => {
 describe('startDesktopNotifier', () => {
   beforeEach(() => {
     notifyMock.mockReset();
+    shouldNotifyIdlePromptMock.mockReset();
   });
 
   it('toasts on permission_request when the toggle is on, resolving the instance name', () => {
@@ -247,6 +259,51 @@ describe('startDesktopNotifier', () => {
       payload: { notification_type: 'idle_prompt', message: 'Claude is waiting for your input' },
       createdAt: Date.now(),
     });
+
+    expect(notifyMock).toHaveBeenCalledTimes(1);
+    const [opts] = notifyMock.mock.calls[0] as [{ title: string; message?: string }];
+    expect(opts.title).toBe('proj needs input');
+    dn.stop();
+  });
+
+  it('suppresses an idle idle_prompt when aiIdleFilter is on and the filter resolves false', async () => {
+    const db = buildDb();
+    insertSession(db, 'proj', 'sess-1');
+    sessionsRepo.setStatus(db, 'sess-1', 'idle', Date.now());
+    shouldNotifyIdlePromptMock.mockResolvedValue(false);
+    const bus = new HubBus();
+    const dn = startDesktopNotifier({ db, bus, config: buildConfig({ aiIdleFilter: true }), log: silentLogger() });
+
+    bus.emit({
+      type: 'session_event',
+      sessionId: 'sess-1',
+      eventType: 'Notification',
+      payload: { notification_type: 'idle_prompt', message: 'Claude is waiting for your input' },
+      createdAt: Date.now(),
+    });
+    await tick();
+
+    expect(shouldNotifyIdlePromptMock).toHaveBeenCalledTimes(1);
+    expect(notifyMock).not.toHaveBeenCalled();
+    dn.stop();
+  });
+
+  it('toasts an idle idle_prompt when aiIdleFilter is on and the filter resolves true', async () => {
+    const db = buildDb();
+    insertSession(db, 'proj', 'sess-1');
+    sessionsRepo.setStatus(db, 'sess-1', 'idle', Date.now());
+    shouldNotifyIdlePromptMock.mockResolvedValue(true);
+    const bus = new HubBus();
+    const dn = startDesktopNotifier({ db, bus, config: buildConfig({ aiIdleFilter: true }), log: silentLogger() });
+
+    bus.emit({
+      type: 'session_event',
+      sessionId: 'sess-1',
+      eventType: 'Notification',
+      payload: { notification_type: 'idle_prompt', message: 'Claude is waiting for your input' },
+      createdAt: Date.now(),
+    });
+    await tick();
 
     expect(notifyMock).toHaveBeenCalledTimes(1);
     const [opts] = notifyMock.mock.calls[0] as [{ title: string; message?: string }];

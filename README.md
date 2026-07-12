@@ -197,6 +197,7 @@ The hub raises OS toast notifications ([node-notifier](https://www.npmjs.com/pac
 |---|---|---|
 | A tool call is waiting on your permission decision | `notifications.permissionRequests` (`true`) | `<instance> — permission` with the tool name and a preview of its input |
 | A session goes idle needing input (Claude Code's own "waiting" notification) | `notifications.needsInput` (`true`) | `<instance> needs input` |
+| — filtered by an AI classifier, if enabled | `notifications.aiIdleFilter` (`false`) | Reads the session's last assistant message from its transcript and asks a small model (`notifications.aiIdleFilterModel`, default `claude-haiku-4-5`) whether it needs your action now; suppresses the toast/push only on a clean "no" (status update / completion report / background work continuing). Fails open — any error (no token, network, timeout) still notifies |
 | A turn ends | `notifications.turnEnd` (`false` — noisy if left on) | `<instance> finished a turn` |
 | The usage limit is hit, or clears back to normal | `notifications.limit` (`true`) | one toast entering the limited state, one toast on recovery — never a toast per poll tick |
 | Chat delivery spawns a headless session to process unread inter-instance mail | `notifications.chatDelivery` (`true`) | `<instance> — incoming chat` with a count and the sender name(s) |
@@ -270,6 +271,8 @@ There's no away-detection mechanism outside Windows — on any other platform th
 | `notifications.turnEnd` | Toast when a turn ends (default `false` — noisy if left on) |
 | `notifications.limit` | Toast on entering/recovering from the usage-limited state (default `true`) |
 | `notifications.chatDelivery` | Toast/push when a hub-spawned headless session starts processing unread chat mail (default `true`) |
+| `notifications.aiIdleFilter` | Ask a small model whether a surviving `idle_prompt` notification actually needs your action, suppressing it if not (default `false`) |
+| `notifications.aiIdleFilterModel` | Model id used for that classification (default `claude-haiku-4-5`) |
 | `push.enabled` | Master switch for APNs push notifications to registered iOS devices (default `false`) |
 | `push.awayThresholdMinutes` | Minutes of no keyboard/mouse input before the desktop user counts as "away" and pushes start firing (default `3`) |
 | `push.apns.keyPath` | Absolute path to the APNs auth key (`.p8`) downloaded from the developer portal |

@@ -4,6 +4,7 @@ import type Database from 'better-sqlite3';
 import type { HubConfig, HubEvent, Logger } from '../types.js';
 import type { HubBus } from '../core/bus.js';
 import * as sessionsRepo from '../db/repo/sessions.js';
+import { shouldNotifyIdlePrompt } from './needsInputFilter.js';
 
 export interface DesktopNotifierDeps {
   db: Database.Database;
@@ -118,6 +119,12 @@ export function startDesktopNotifier(deps: DesktopNotifierDeps): DesktopNotifier
           }
           const name = sess?.instance_name ?? e.sessionId.slice(0, 8);
           const message = typeof payload.message === 'string' ? payload.message : undefined;
+          if (payload.notification_type === 'idle_prompt' && config.notifications.aiIdleFilter) {
+            void shouldNotifyIdlePrompt(sess?.transcript_path ?? null, config, log, fetch, e.sessionId).then((notify) => {
+              if (notify) toast(log, `${name} needs input`, message);
+            });
+            return;
+          }
           toast(log, `${name} needs input`, message);
           return;
         }

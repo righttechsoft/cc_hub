@@ -4,6 +4,7 @@ import type { HubBus } from '../core/bus.js';
 import * as sessionsRepo from '../db/repo/sessions.js';
 import * as pushTokensRepo from '../db/repo/pushTokens.js';
 import { formatToolInput, truncateToast } from './desktopNotifier.js';
+import { shouldNotifyIdlePrompt } from './needsInputFilter.js';
 import type { AwayDetector } from './awayDetector.js';
 import type { ApnsSender } from './apns.js';
 
@@ -82,6 +83,12 @@ export function startPushNotifier(deps: PushNotifierDeps): PushNotifier {
           }
           const name = sess?.instance_name ?? e.sessionId.slice(0, 8);
           const message = typeof payload.message === 'string' ? payload.message : undefined;
+          if (payload.notification_type === 'idle_prompt' && config.notifications.aiIdleFilter) {
+            void shouldNotifyIdlePrompt(sess?.transcript_path ?? null, config, log, fetch, e.sessionId).then((notify) => {
+              if (notify) void pushAll(`${name} needs input`, message);
+            });
+            return;
+          }
           void pushAll(`${name} needs input`, message);
           return;
         }

@@ -62,6 +62,8 @@ export interface HubConfig {
     turnEnd: boolean;
     limit: boolean;
     chatDelivery: boolean;
+    aiIdleFilter: boolean;
+    aiIdleFilterModel: string;
   };
   push: {
     enabled: boolean;
