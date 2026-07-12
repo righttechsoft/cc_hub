@@ -29,7 +29,7 @@ function isRecord(v: unknown): v is Record<string, unknown> {
   return typeof v === 'object' && v !== null && !Array.isArray(v);
 }
 
-function truncateToast(s: string): string {
+export function truncateToast(s: string): string {
   return s.length > TOAST_MESSAGE_MAX_CHARS ? `${s.slice(0, TOAST_MESSAGE_MAX_CHARS - 1)}…` : s;
 }
 
@@ -144,6 +144,15 @@ export function startDesktopNotifier(deps: DesktopNotifierDeps): DesktopNotifier
           }
         }
         // waiting_reset / continuing / unknown: no toast, and the episode flag is left untouched.
+        return;
+      }
+      case 'chat_delivery': {
+        if (!config.notifications.chatDelivery) return;
+        toast(
+          log,
+          `${e.instance} — incoming chat`,
+          truncateToast(`processing ${e.count} message${e.count === 1 ? '' : 's'} from ${e.fromNames.join(', ')}`)
+        );
         return;
       }
       default:

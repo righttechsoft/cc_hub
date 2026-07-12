@@ -49,7 +49,7 @@ const watcher: ILimitWatcher | undefined = config.limitWatcher.enabled
   ? startLimitWatcher({ db, config, bus, log, continuation })
   : undefined;
 
-const chatDelivery = config.chatDelivery.enabled ? startChatDelivery({ db, log, config, runner }) : undefined;
+const chatDelivery = config.chatDelivery.enabled ? startChatDelivery({ db, log, config, runner, bus }) : undefined;
 
 const desktopNotifier = config.notifications.enabled
   ? startDesktopNotifier({ db, bus, config, log })

@@ -3,7 +3,7 @@ import type { HubConfig, HubEvent, Logger } from '../types.js';
 import type { HubBus } from '../core/bus.js';
 import * as sessionsRepo from '../db/repo/sessions.js';
 import * as pushTokensRepo from '../db/repo/pushTokens.js';
-import { formatToolInput } from './desktopNotifier.js';
+import { formatToolInput, truncateToast } from './desktopNotifier.js';
 import type { AwayDetector } from './awayDetector.js';
 import type { ApnsSender } from './apns.js';
 
@@ -107,6 +107,14 @@ export function startPushNotifier(deps: PushNotifierDeps): PushNotifier {
             void pushAll('cc_hub — usage limit', 'Usage limit reset — back to normal');
           }
         }
+        return;
+      }
+      case 'chat_delivery': {
+        if (!config.notifications.chatDelivery) return;
+        void pushAll(
+          `${e.instance} — incoming chat`,
+          truncateToast(`processing ${e.count} message${e.count === 1 ? '' : 's'} from ${e.fromNames.join(', ')}`)
+        );
         return;
       }
       default:

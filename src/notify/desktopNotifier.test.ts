@@ -52,6 +52,7 @@ function buildConfig(opts?: Partial<HubConfig['notifications']>): HubConfig {
       needsInput: true,
       turnEnd: false,
       limit: true,
+      chatDelivery: true,
       ...opts,
     },
     push: {
@@ -305,6 +306,45 @@ describe('startDesktopNotifier', () => {
     const dn = startDesktopNotifier({ db, bus, config: buildConfig(), log: silentLogger() });
 
     bus.emit({ type: 'permission_decided', request: fakePermission({ status: 'allowed', decided_by: 'mobile' }) });
+
+    expect(notifyMock).not.toHaveBeenCalled();
+    dn.stop();
+  });
+
+  it('toasts on chat_delivery when the toggle is on', () => {
+    const db = buildDb();
+    const bus = new HubBus();
+    const dn = startDesktopNotifier({ db, bus, config: buildConfig(), log: silentLogger() });
+
+    bus.emit({
+      type: 'chat_delivery',
+      instance: 'proj',
+      fromNames: ['other'],
+      count: 2,
+      createdAt: Date.now(),
+    });
+
+    expect(notifyMock).toHaveBeenCalledTimes(1);
+    const [opts] = notifyMock.mock.calls[0] as [{ title: string; message?: string }];
+    expect(opts.title).toBe('proj — incoming chat');
+    expect(opts.message).toContain('2 messages');
+    expect(opts.message).toContain('other');
+
+    dn.stop();
+  });
+
+  it('does not toast on chat_delivery when notifications.chatDelivery is off', () => {
+    const db = buildDb();
+    const bus = new HubBus();
+    const dn = startDesktopNotifier({ db, bus, config: buildConfig({ chatDelivery: false }), log: silentLogger() });
+
+    bus.emit({
+      type: 'chat_delivery',
+      instance: 'proj',
+      fromNames: ['other'],
+      count: 1,
+      createdAt: Date.now(),
+    });
 
     expect(notifyMock).not.toHaveBeenCalled();
     dn.stop();

@@ -33,6 +33,8 @@ function toFrame(e: HubEvent): WsFrame {
       return { type: 'permission_decided', data: e.request };
     case 'limit_state':
       return { type: 'limit_state', data: e.state };
+    case 'chat_delivery':
+      return { type: 'chat_delivery', data: { instance: e.instance, fromNames: e.fromNames, count: e.count, createdAt: e.createdAt } };
     default:
       return exhaustiveCheck(e);
   }

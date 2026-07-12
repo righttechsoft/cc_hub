@@ -60,7 +60,7 @@ function buildConfig(opts?: {
       maxSpawnsPerInstancePerHour: 4,
     },
     athen: { embeddings: false, model: 'Xenova/all-MiniLM-L6-v2' },
-    notifications: { enabled: false, permissionRequests: true, needsInput: true, turnEnd: false, limit: true },
+    notifications: { enabled: false, permissionRequests: true, needsInput: true, turnEnd: false, limit: true, chatDelivery: true },
     push: {
       enabled: false,
       awayThresholdMinutes: 3,

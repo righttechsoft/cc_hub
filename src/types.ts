@@ -61,6 +61,7 @@ export interface HubConfig {
     needsInput: boolean;
     turnEnd: boolean;
     limit: boolean;
+    chatDelivery: boolean;
   };
   push: {
     enabled: boolean;
@@ -227,7 +228,8 @@ export type HubEvent =
   | { type: 'message'; message: MessageRow }
   | { type: 'permission_request'; request: PermissionRow }
   | { type: 'permission_decided'; request: PermissionRow }
-  | { type: 'limit_state'; state: LimitStateRow };
+  | { type: 'limit_state'; state: LimitStateRow }
+  | { type: 'chat_delivery'; instance: string; fromNames: string[]; count: number; createdAt: number };
 
 // --- Service interfaces (seams between modules) ---
 

@@ -2,6 +2,7 @@ import { statSync } from 'node:fs';
 import type Database from 'better-sqlite3';
 import type { HubConfig, IClaudeRunner, Logger, MessageRow } from '../types.js';
 import { renderChatDeliveryPrompt } from '../core/messageFormat.js';
+import type { HubBus } from '../core/bus.js';
 import * as sessionsRepo from '../db/repo/sessions.js';
 import * as messagesRepo from '../db/repo/messages.js';
 import * as instancesRepo from '../db/repo/instances.js';
@@ -30,6 +31,7 @@ export interface ChatDeliveryDeps {
   log: Logger;
   config: HubConfig;
   runner: IClaudeRunner;
+  bus: HubBus;
 }
 
 export interface ChatDelivery {
@@ -44,7 +46,7 @@ export interface ChatDelivery {
 // repaints for a `--resume` turn either (see Limitations / the UserPromptSubmit FYI re-surface),
 // so there's no benefit to resuming one over just starting a clean session.
 export function startChatDelivery(deps: ChatDeliveryDeps): ChatDelivery {
-  const { db, log, config, runner } = deps;
+  const { db, log, config, runner, bus } = deps;
 
   let ticking = false;
   let stopped = false;
@@ -138,6 +140,11 @@ export function startChatDelivery(deps: ChatDeliveryDeps): ChatDelivery {
 
         timestamps.push(now);
         spawnTimestamps.set(instanceName, timestamps);
+
+        // Dispatch-time visibility: nothing else tells a human this happened (see toast/push/wsHub
+        // consumers of 'chat_delivery'). fromNames is unique, first-seen order.
+        const fromNames = [...new Set(batch.map((m) => m.from_name))];
+        bus.emit({ type: 'chat_delivery', instance: instanceName, fromNames, count: batch.length, createdAt: now });
 
         // Fire-and-forget: mark read once the spawned turn's exit code is known, not at dispatch.
         // In practice this is usually a no-op: the new session's own UserPromptSubmit hook

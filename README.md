@@ -199,6 +199,7 @@ The hub raises OS toast notifications ([node-notifier](https://www.npmjs.com/pac
 | A session goes idle needing input (Claude Code's own "waiting" notification) | `notifications.needsInput` (`true`) | `<instance> needs input` |
 | A turn ends | `notifications.turnEnd` (`false` — noisy if left on) | `<instance> finished a turn` |
 | The usage limit is hit, or clears back to normal | `notifications.limit` (`true`) | one toast entering the limited state, one toast on recovery — never a toast per poll tick |
+| Chat delivery spawns a headless session to process unread inter-instance mail | `notifications.chatDelivery` (`true`) | `<instance> — incoming chat` with a count and the sender name(s) |
 
 `notifications.enabled: false` turns the whole feature off. Every toast call is wrapped so a notification failure (no notification daemon running, SnoreToast missing, etc.) is logged at debug level and never affects the hub itself — v1 is fire-and-forget, no click actions.
 
@@ -268,6 +269,7 @@ There's no away-detection mechanism outside Windows — on any other platform th
 | `notifications.needsInput` | Toast when a session goes idle needing input (default `true`) |
 | `notifications.turnEnd` | Toast when a turn ends (default `false` — noisy if left on) |
 | `notifications.limit` | Toast on entering/recovering from the usage-limited state (default `true`) |
+| `notifications.chatDelivery` | Toast/push when a hub-spawned headless session starts processing unread chat mail (default `true`) |
 | `push.enabled` | Master switch for APNs push notifications to registered iOS devices (default `false`) |
 | `push.awayThresholdMinutes` | Minutes of no keyboard/mouse input before the desktop user counts as "away" and pushes start firing (default `3`) |
 | `push.apns.keyPath` | Absolute path to the APNs auth key (`.p8`) downloaded from the developer portal |

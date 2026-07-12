@@ -4,10 +4,11 @@ import { join } from 'node:path';
 import Database from 'better-sqlite3';
 import { runMigrations } from '../db/migrations.js';
 import { startChatDelivery, type ChatDelivery } from './chatDelivery.js';
+import { HubBus } from '../core/bus.js';
 import * as instancesRepo from '../db/repo/instances.js';
 import * as sessionsRepo from '../db/repo/sessions.js';
 import * as messagesRepo from '../db/repo/messages.js';
-import type { HubConfig, IClaudeRunner, Logger, RunResult, SessionStatus } from '../types.js';
+import type { HubConfig, HubEvent, IClaudeRunner, Logger, RunResult, SessionStatus } from '../types.js';
 
 type TickableChatDelivery = ChatDelivery & { _tick(): Promise<void> };
 
@@ -49,7 +50,7 @@ function buildConfig(opts?: Partial<HubConfig['chatDelivery']>): HubConfig {
       ...opts,
     },
     athen: { embeddings: false, model: 'Xenova/all-MiniLM-L6-v2' },
-    notifications: { enabled: false, permissionRequests: true, needsInput: true, turnEnd: false, limit: true },
+    notifications: { enabled: false, permissionRequests: true, needsInput: true, turnEnd: false, limit: true, chatDelivery: true },
     push: {
       enabled: false,
       awayThresholdMinutes: 3,
@@ -120,9 +121,10 @@ function startDelivery(
   db: Database.Database,
   config: HubConfig,
   log: Logger,
-  runner: IClaudeRunner = fakeRunner()
+  runner: IClaudeRunner = fakeRunner(),
+  bus: HubBus = new HubBus()
 ): TickableChatDelivery {
-  const cd = startChatDelivery({ db, log, config, runner }) as TickableChatDelivery;
+  const cd = startChatDelivery({ db, log, config, runner, bus }) as TickableChatDelivery;
   cd.stop();
   return cd;
 }
@@ -289,5 +291,56 @@ describe('startChatDelivery', () => {
 
     expect(startNew).toHaveBeenCalledTimes(2);
     expect(messagesRepo.unreadFor(db, 'recipient')).toHaveLength(0);
+  });
+
+  it('emits a chat_delivery bus event at dispatch, with unique from_names in first-seen order', async () => {
+    const db = buildDb();
+    insertInstance(db, 'sender-a');
+    insertInstance(db, 'sender-b');
+    const cwd = tmpdir();
+    insertInstance(db, 'recipient', cwd);
+    const now = Date.now();
+    messagesRepo.send(db, { from: 'sender-a', to: 'recipient', body: 'one', urgent: false, now });
+    messagesRepo.send(db, { from: 'sender-b', to: 'recipient', body: 'two', urgent: false, now: now + 1 });
+    messagesRepo.send(db, { from: 'sender-a', to: 'recipient', body: 'three', urgent: false, now: now + 2 });
+
+    const runner = fakeRunner();
+    const bus = new HubBus();
+    const events: HubEvent[] = [];
+    bus.on((e) => events.push(e));
+    const chatDelivery = startDelivery(db, buildConfig(), silentLogger(), runner, bus);
+
+    await chatDelivery._tick();
+    await flushAsync();
+
+    const delivered = events.filter((e) => e.type === 'chat_delivery');
+    expect(delivered).toHaveLength(1);
+    expect(delivered[0]).toMatchObject({
+      type: 'chat_delivery',
+      instance: 'recipient',
+      fromNames: ['sender-a', 'sender-b'],
+      count: 3,
+    });
+  });
+
+  it('does not emit a chat_delivery event when delivery is skipped (active session)', async () => {
+    const db = buildDb();
+    insertInstance(db, 'sender');
+    const cwd = tmpdir();
+    const recipientId = insertInstance(db, 'recipient', cwd);
+    const now = Date.now();
+    insertSession(db, { id: 'sess-active', instanceId: recipientId, status: 'active', lastEventAt: now });
+    messagesRepo.send(db, { from: 'sender', to: 'recipient', body: 'still here?', urgent: false, now });
+
+    const runner = fakeRunner();
+    const bus = new HubBus();
+    const events: HubEvent[] = [];
+    bus.on((e) => events.push(e));
+    const chatDelivery = startDelivery(db, buildConfig(), silentLogger(), runner, bus);
+
+    await chatDelivery._tick();
+    await flushAsync();
+
+    expect(events.filter((e) => e.type === 'chat_delivery')).toHaveLength(0);
   });
 });

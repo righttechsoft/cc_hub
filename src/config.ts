@@ -33,7 +33,14 @@ const defaults: HubConfig = {
     maxSpawnsPerInstancePerHour: 4,
   },
   athen: { embeddings: true, model: 'Xenova/all-MiniLM-L6-v2' },
-  notifications: { enabled: true, permissionRequests: true, needsInput: true, turnEnd: false, limit: true },
+  notifications: {
+    enabled: true,
+    permissionRequests: true,
+    needsInput: true,
+    turnEnd: false,
+    limit: true,
+    chatDelivery: true,
+  },
   push: {
     enabled: false,
     awayThresholdMinutes: 3,

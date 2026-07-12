@@ -48,6 +48,7 @@ function buildConfig(opts?: Partial<HubConfig['notifications']>): HubConfig {
       needsInput: true,
       turnEnd: false,
       limit: true,
+      chatDelivery: true,
       ...opts,
     },
     push: {
@@ -233,6 +234,46 @@ describe('startPushNotifier', () => {
     await tick();
 
     expect(sender.send).toHaveBeenCalledTimes(2);
+    pn.stop();
+  });
+
+  it('pushes on chat_delivery while away when the toggle is on', async () => {
+    const db = buildDb();
+    pushTokensRepo.upsert(db, { token: 'aaaa1111', platform: 'ios', now: Date.now() });
+    const bus = new HubBus();
+    const sender = fakeSender();
+    const pn = startPushNotifier({ db, bus, config: buildConfig(), log: silentLogger(), away: fakeAway(true), sender });
+
+    bus.emit({ type: 'chat_delivery', instance: 'proj', fromNames: ['other'], count: 2, createdAt: Date.now() });
+    await tick();
+
+    expect(sender.send).toHaveBeenCalledTimes(1);
+    const [, title, message] = sender.send.mock.calls[0] as [string, string, string | undefined];
+    expect(title).toBe('proj — incoming chat');
+    expect(message).toContain('2 messages');
+    expect(message).toContain('other');
+
+    pn.stop();
+  });
+
+  it('does not push on chat_delivery when notifications.chatDelivery is off', async () => {
+    const db = buildDb();
+    pushTokensRepo.upsert(db, { token: 'aaaa1111', platform: 'ios', now: Date.now() });
+    const bus = new HubBus();
+    const sender = fakeSender();
+    const pn = startPushNotifier({
+      db,
+      bus,
+      config: buildConfig({ chatDelivery: false }),
+      log: silentLogger(),
+      away: fakeAway(true),
+      sender,
+    });
+
+    bus.emit({ type: 'chat_delivery', instance: 'proj', fromNames: ['other'], count: 1, createdAt: Date.now() });
+    await tick();
+
+    expect(sender.send).not.toHaveBeenCalled();
     pn.stop();
   });
 });
