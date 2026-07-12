@@ -5,6 +5,7 @@ import Database from 'better-sqlite3';
 import { runMigrations } from '../db/migrations.js';
 import { buildApiRoutes } from './apiRoutes.js';
 import { createAthen } from '../kb/athen.js';
+import * as pushTokensRepo from '../db/repo/pushTokens.js';
 import type { HubConfig, IClaudeRunner, IPromptDelivery, Logger, RunResult } from '../types.js';
 import { HubBus } from '../core/bus.js';
 
@@ -46,6 +47,11 @@ function buildConfig(): HubConfig {
     },
     athen: { embeddings: false, model: 'Xenova/all-MiniLM-L6-v2' },
     notifications: { enabled: false, permissionRequests: true, needsInput: true, turnEnd: false, limit: true },
+    push: {
+      enabled: false,
+      awayThresholdMinutes: 3,
+      apns: { keyPath: '', keyId: '', teamId: '', bundleId: 'com.righttechsoft.ccHubMobile', environment: 'production' },
+    },
     logLevel: 'info',
   };
 }
@@ -220,5 +226,38 @@ describe('POST /sessions', () => {
     expect(body).toEqual({ spawned: true });
     expect(runner.startNew).toHaveBeenCalledTimes(1);
     expect(runner.startNew).toHaveBeenCalledWith({ cwd, prompt: 'hello there', permissionMode: undefined });
+  });
+});
+
+describe('POST /push/register', () => {
+  it('200s and stores a valid hex device token', async () => {
+    const runner = fakeRunner();
+    const { app, db } = buildApp(runner);
+
+    const res = await app.request('/push/register', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ token: 'AABBCCDD00112233' }),
+    });
+
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { ok: boolean };
+    expect(body).toEqual({ ok: true });
+    expect(pushTokensRepo.list(db).map((r) => r.token)).toEqual(['aabbccdd00112233']);
+  });
+
+  it('400s for a non-hex token', async () => {
+    const runner = fakeRunner();
+    const { app } = buildApp(runner);
+
+    const res = await app.request('/push/register', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ token: 'not-a-hex-token!!' }),
+    });
+
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { error: { code: string } };
+    expect(body.error.code).toBe('bad_request');
   });
 });

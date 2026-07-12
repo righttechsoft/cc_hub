@@ -145,6 +145,17 @@ const MIGRATIONS: Migration[] = [
     version: 2,
     sql: 'ALTER TABLE message_reads ADD COLUMN via TEXT',
   },
+  {
+    version: 3,
+    sql: `
+      CREATE TABLE IF NOT EXISTS push_tokens (
+        token TEXT PRIMARY KEY,
+        platform TEXT NOT NULL DEFAULT 'ios',
+        created_at INTEGER NOT NULL,
+        last_seen_at INTEGER NOT NULL
+      );
+    `,
+  },
 ];
 
 export function runMigrations(db: Database.Database): void {

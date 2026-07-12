@@ -50,6 +50,11 @@ function buildConfig(opts?: Partial<HubConfig['chatDelivery']>): HubConfig {
     },
     athen: { embeddings: false, model: 'Xenova/all-MiniLM-L6-v2' },
     notifications: { enabled: false, permissionRequests: true, needsInput: true, turnEnd: false, limit: true },
+    push: {
+      enabled: false,
+      awayThresholdMinutes: 3,
+      apns: { keyPath: '', keyId: '', teamId: '', bundleId: 'com.righttechsoft.ccHubMobile', environment: 'production' },
+    },
     logLevel: 'info',
   };
 }

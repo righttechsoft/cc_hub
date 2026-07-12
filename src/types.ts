@@ -62,6 +62,17 @@ export interface HubConfig {
     turnEnd: boolean;
     limit: boolean;
   };
+  push: {
+    enabled: boolean;
+    awayThresholdMinutes: number;
+    apns: {
+      keyPath: string;
+      keyId: string;
+      teamId: string;
+      bundleId: string;
+      environment: 'production' | 'sandbox';
+    };
+  };
   logLevel: 'debug' | 'info' | 'warn' | 'error';
 }
 
@@ -175,6 +186,13 @@ export interface LimitEventRow {
   type: string;
   detail: string | null;
   created_at: number;
+}
+
+export interface PushTokenRow {
+  token: string;
+  platform: string;
+  created_at: number;
+  last_seen_at: number;
 }
 
 // --- Hook / runner payloads ---

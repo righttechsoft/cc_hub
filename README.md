@@ -143,6 +143,7 @@ Base URL: `http://<lan-ip>:<port>/api/v1`. Every request needs `Authorization: B
 | `GET /kb/:id` | — | Full note body |
 | `POST /kb` | `{title, body, tags?}` | Author is forced to `"mobile"` |
 | `GET /limit` | — | Current `limit_state` row + last 20 `limit_events` |
+| `POST /push/register` | `{token}` | Registers an APNs device token (hex, lowercased); called by the mobile app on launch |
 | `POST /debug/limit` | `{state, resetsAtMs?}` | Dev-only (gated on `logLevel:"debug"`); forces the watcher's state for testing |
 
 ### WebSocket
@@ -201,6 +202,32 @@ The hub raises OS toast notifications ([node-notifier](https://www.npmjs.com/pac
 
 `notifications.enabled: false` turns the whole feature off. Every toast call is wrapped so a notification failure (no notification daemon running, SnoreToast missing, etc.) is logged at debug level and never affects the hub itself — v1 is fire-and-forget, no click actions.
 
+## Mobile push notifications
+
+When you're away from the desktop (no keyboard/mouse input for `push.awayThresholdMinutes`, default 3), the same moments that raise a desktop toast also send an APNs push to your registered iOS device(s) — no separate toggles, `notifications.*` drives both.
+
+Setup:
+
+1. In the [Apple developer portal](https://developer.apple.com/account), go to **Certificates, Identifiers & Profiles → Keys → +**, enable **Apple Push Notifications service (APNs)**, and create the key.
+2. Download the `.p8` file — Apple only lets you download it once, so keep it somewhere safe.
+3. Fill in the `push` block in `config.json`:
+   ```json
+   "push": {
+     "enabled": true,
+     "awayThresholdMinutes": 3,
+     "apns": {
+       "keyPath": "C:\\path\\to\\AuthKey_XXXXXXXXXX.p8",
+       "keyId": "XXXXXXXXXX",
+       "teamId": "<your Apple team id>",
+       "bundleId": "com.righttechsoft.ccHubMobile",
+       "environment": "production"
+     }
+   }
+   ```
+4. Restart the hub. The mobile app registers its device token automatically on launch (`POST /api/v1/push/register`); no further action is needed on the desktop side.
+
+There's no away-detection mechanism outside Windows — on any other platform the hub treats the user as always away (a warning is logged once at startup), so pushes fire for every toggled-on event rather than never.
+
 ## Configuration reference
 
 `config.json` (gitignored; generated from `config.example.json` by `npm run setup`):
@@ -241,6 +268,13 @@ The hub raises OS toast notifications ([node-notifier](https://www.npmjs.com/pac
 | `notifications.needsInput` | Toast when a session goes idle needing input (default `true`) |
 | `notifications.turnEnd` | Toast when a turn ends (default `false` — noisy if left on) |
 | `notifications.limit` | Toast on entering/recovering from the usage-limited state (default `true`) |
+| `push.enabled` | Master switch for APNs push notifications to registered iOS devices (default `false`) |
+| `push.awayThresholdMinutes` | Minutes of no keyboard/mouse input before the desktop user counts as "away" and pushes start firing (default `3`) |
+| `push.apns.keyPath` | Absolute path to the APNs auth key (`.p8`) downloaded from the developer portal |
+| `push.apns.keyId` | The key's 10-character id from the developer portal |
+| `push.apns.teamId` | Your Apple team id |
+| `push.apns.bundleId` | The mobile app's bundle id (default `com.righttechsoft.ccHubMobile`) |
+| `push.apns.environment` | `production` or `sandbox` (default `production`) |
 | `logLevel` | `debug\|info\|warn\|error` |
 
 ## Firewall & autostart

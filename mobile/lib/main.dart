@@ -1,8 +1,11 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 
 import 'api_client.dart';
 import 'connection.dart';
+import 'push_registration.dart';
 import 'restart_widget.dart';
 import 'screens/home.dart';
 import 'screens/setup.dart';
@@ -111,6 +114,7 @@ class _HubServicesRootState extends State<_HubServicesRoot> with WidgetsBindingO
     _connection.onFrame = _store.applyFrame;
     _connection.onWsConnected = _refreshPending;
     _connection.connectWs();
+    unawaited(registerPushToken(_api));
   }
 
   Future<void> _refreshPending() async {
@@ -128,6 +132,7 @@ class _HubServicesRootState extends State<_HubServicesRoot> with WidgetsBindingO
     if (_connection.wsStatus == WsStatus.down) {
       _connection.connectWs();
     }
+    unawaited(registerPushToken(_api));
   }
 
   @override

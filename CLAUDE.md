@@ -19,7 +19,7 @@ Always-on Node hub coordinating multiple Claude Code (CC) instances on one machi
 
 ```
 config → db (migrations) → bus → runner → delivery → continuation → watcher?
-      → chatDelivery? → desktopNotifier? → hooksRoutes → mcp gateway → apiRoutes → buildApp
+      → chatDelivery? → desktopNotifier? → awayDetector?/apnsSender?/pushNotifier? → hooksRoutes → mcp gateway → apiRoutes → buildApp
       → serve(0.0.0.0:4270) → injectWebSocket → relay?
 ```
 
@@ -109,6 +109,14 @@ REST under `/api/v1`: health, sessions (+events, +prompt, +auto-continue), permi
 
 Instance name resolved via `sessionsRepo.getJoined(sessionId)?.instance_name`, short session id as fallback. The `limit_state` toggle tracks a `limitedEpisodeActive` flag rather than literally the previous tick's state — the real watcher chain is `limited → waiting_reset → continuing → ok`, so a strict previous-state comparison would miss the recovery toast; the flag only flips on entering `'limited'` and recovering to `'ok'`, and is inert (no toast, untouched) through `waiting_reset`/`continuing`/`unknown`. Every `notifier.notify()` call is wrapped in try/catch → `log.debug` on failure — notifications must never crash or block the hub. Fire-and-forget, no click actions/callbacks in v1.
 
+### Push notifications (`src/notify/awayDetector.ts`, `apns.ts`, `pushNotifier.ts`)
+
+Same event selection and `config.notifications.*` toggles as desktop toasts above (deliberately shared — see `pushNotifier.ts`, which imports `formatToolInput` from `desktopNotifier.ts`), gated behind `config.push.enabled` and an away check: pushes only go out when the desktop user is away.
+
+- **Away detection** (`awayDetector.ts`, Windows-only): spawns one persistent PowerShell child that Add-Types a `GetLastInputInfo` P/Invoke and prints idle milliseconds every 15s over stdout; Node reads it via `readline`. Pure decision function `computeAway(sample, nowMs, thresholdMs)` is **fail-open** — no sample yet, or a sample stale by >60s, or accrued idle time past `push.awayThresholdMinutes` (default 3) all read as "away", so a broken/killed detector degrades to "push everything" rather than going silent. Child exit (not via `stop()`) → warn + respawn after 30s. On non-Windows, `isAway()` always returns `true` (warns once at startup) and no child is spawned.
+- **APNs sender** (`apns.ts`): no SDK — direct `node:http2` POST to `api.push.apple.com` (or `.sandbox.` per `push.apns.environment`) per send (no session pooling; pushes are rare). Auth is a provider JWT built from the `.p8` key at `push.apns.keyPath`, cached in-process for 45 minutes. 200 → `'ok'`; 410 or reason `BadDeviceToken`/`Unregistered`/`DeviceTokenNotForTopic` → `'unregistered'` (caller prunes the token); anything else (incl. connect error, 10s timeout) → `'failed'`. Never throws.
+- **push_tokens table**: `token TEXT PRIMARY KEY, platform, created_at, last_seen_at` (migration v3). `POST /api/v1/push/register {token}` upserts (hex-validated, lowercased); the mobile app calls it on launch. `pushNotifier` prunes a token the moment APNs reports it unregistered.
+
 ## Hooks (`hooks/cc-hub-hook.mjs`, installed by `scripts/install-hooks.mjs`)
 
 Zero-dep client: stdin JSON → POST `/hooks/event` → prints server's `stdout` field verbatim. **Fail-silent contract: any error (hub down, timeout, non-2xx) → print nothing, exit 0 — CC must never break when hub is down.** Installer APPEND-merges into `~/.claude/settings.json` (timestamped backup, idempotent). Events: SessionStart, UserPromptSubmit, Notification, Stop, PermissionRequest, SessionEnd (PostToolUse off by default). Stop handler order: loop-guard (`stop_hook_active`) → queued prompt block → urgent unread block → set idle.
@@ -135,6 +143,7 @@ Optional remote access (`relay.enabled`, off by default). Hub is behind NAT → 
 - Hook output JSON shapes (Stop block, PermissionRequest decision) drift across CC versions — composed server-side only (`hooksRoutes.ts`), hook script stays a dumb pipe.
 - The usage endpoint is unofficial and intermittently 429s; watcher degrades to `unknown` and recovers — never false-continues (fresh-poll confirmation before continuing).
 - `logs/`, `data/`, `config.json`, `worker/.dev.vars`, `.wrangler/` are gitignored; repo is public (github.com/righttechsoft/cc_hub) — no secrets/personal paths in committed files.
+- APNs ES256 JWT must use `dsaEncoding: 'ieee-p1363'` on both `crypto.sign`/`crypto.verify` — node's default DER-encoded ECDSA signature is silently rejected by Apple.
 
 ## Verify after changes
 

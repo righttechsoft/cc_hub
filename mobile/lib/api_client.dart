@@ -172,6 +172,14 @@ class ApiClient {
     );
   }
 
+  Future<void> registerPush(String token) async {
+    await connection.request(
+      'POST',
+      '/push/register',
+      jsonBody: {'token': token, 'platform': 'ios'},
+    );
+  }
+
   List<Map<String, dynamic>> _list(dynamic value) {
     if (value is! List) return const [];
     return value.whereType<Map<String, dynamic>>().toList();

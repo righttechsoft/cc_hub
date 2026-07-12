@@ -24,6 +24,9 @@ import { startChatDelivery } from './chat/chatDelivery.js';
 import { createEmbedder } from './kb/embedder.js';
 import { createAthen } from './kb/athen.js';
 import { startDesktopNotifier } from './notify/desktopNotifier.js';
+import { startAwayDetector } from './notify/awayDetector.js';
+import { createApnsSender } from './notify/apns.js';
+import { startPushNotifier } from './notify/pushNotifier.js';
 import type { ILimitWatcher } from './types.js';
 
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -51,6 +54,13 @@ const chatDelivery = config.chatDelivery.enabled ? startChatDelivery({ db, log, 
 const desktopNotifier = config.notifications.enabled
   ? startDesktopNotifier({ db, bus, config, log })
   : undefined;
+
+const awayDetector = config.push.enabled ? startAwayDetector({ config, log }) : undefined;
+const apnsSender = config.push.enabled ? createApnsSender({ config, log }) : undefined;
+const pushNotifier =
+  awayDetector && apnsSender
+    ? startPushNotifier({ db, bus, config, log, away: awayDetector, sender: apnsSender })
+    : undefined;
 
 const hooksRoutes = buildHooksRoutes({
   config,
@@ -139,6 +149,9 @@ function shutdown(signal: string): void {
   relay?.stop();
   chatDelivery?.stop();
   desktopNotifier?.stop();
+  pushNotifier?.stop();
+  apnsSender?.stop();
+  awayDetector?.stop();
   athen.stop();
   db.close();
   server.close();

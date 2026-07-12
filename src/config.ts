@@ -34,6 +34,11 @@ const defaults: HubConfig = {
   },
   athen: { embeddings: true, model: 'Xenova/all-MiniLM-L6-v2' },
   notifications: { enabled: true, permissionRequests: true, needsInput: true, turnEnd: false, limit: true },
+  push: {
+    enabled: false,
+    awayThresholdMinutes: 3,
+    apns: { keyPath: '', keyId: '', teamId: '', bundleId: 'com.righttechsoft.ccHubMobile', environment: 'production' },
+  },
   logLevel: 'info',
 };
 
@@ -67,6 +72,10 @@ export function loadConfig(configPath?: string): HubConfig {
 
   if (merged.relay.enabled && (!merged.relay.url || !merged.relay.secret)) {
     throw new Error('relay.enabled requires relay.url and relay.secret in config.json');
+  }
+
+  if (merged.push.enabled && (!merged.push.apns.keyPath || !merged.push.apns.keyId || !merged.push.apns.teamId)) {
+    throw new Error('push.enabled requires push.apns.keyPath, push.apns.keyId and push.apns.teamId in config.json');
   }
 
   return merged;

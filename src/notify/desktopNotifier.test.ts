@@ -54,6 +54,11 @@ function buildConfig(opts?: Partial<HubConfig['notifications']>): HubConfig {
       limit: true,
       ...opts,
     },
+    push: {
+      enabled: false,
+      awayThresholdMinutes: 3,
+      apns: { keyPath: '', keyId: '', teamId: '', bundleId: 'com.righttechsoft.ccHubMobile', environment: 'production' },
+    },
     logLevel: 'info',
   };
 }

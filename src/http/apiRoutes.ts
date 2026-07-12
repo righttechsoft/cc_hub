@@ -21,6 +21,7 @@ import * as messagesRepo from '../db/repo/messages.js';
 import * as kbRepo from '../db/repo/kb.js';
 import * as permissionsRepo from '../db/repo/permissions.js';
 import * as limitRepo from '../db/repo/limit.js';
+import * as pushTokensRepo from '../db/repo/pushTokens.js';
 import type { Athen } from '../kb/athen.js';
 
 export interface BuildApiRoutesDeps {
@@ -309,6 +310,14 @@ export function buildApiRoutes(deps: BuildApiRoutesDeps): Hono {
     const state = limitRepo.getState(db);
     const events = limitRepo.listEvents(db, 20);
     return c.json({ state, events });
+  });
+
+  app.post('/push/register', async (c) => {
+    const body = await readJsonBody(c);
+    const token = typeof body?.token === 'string' ? body.token.trim().toLowerCase() : '';
+    if (!/^[0-9a-f]{16,200}$/.test(token)) return badRequest(c, 'token must be a hex APNs device token');
+    pushTokensRepo.upsert(db, { token, platform: 'ios', now: Date.now() });
+    return c.json({ ok: true });
   });
 
   app.post('/debug/limit', async (c) => {
