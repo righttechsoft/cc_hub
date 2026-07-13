@@ -133,6 +133,7 @@ Base URL: `http://<lan-ip>:<port>/api/v1`. Every request needs `Authorization: B
 | `GET /sessions?status=` | — | `status` is a comma-separated list (`active,idle,...`) |
 | `GET /sessions/:id` | — | Session + `instance_name`, `pendingPrompts`, last 20 `events` |
 | `GET /sessions/:id/events?afterId&limit` | — | Paginate forward from `afterId` (default 0), `limit` default 100, max 500 |
+| `GET /sessions/:id/transcript?afterByte&tailBytes` | — | Parsed CC transcript (`{entries, byteOffset, truncatedHead}`); `afterByte` for incremental reads, `tailBytes` default 262144 (clamp 16384–1048576); 409 `no_transcript` if the session has none or it can't be read |
 | `POST /sessions/:id/prompt` | `{prompt}` | `{delivery:"spawned"\|"queued", pendingPromptId}`; 409 if session has ended |
 | `POST /sessions/:id/auto-continue` | `{enabled}` | Toggle auto-continue for one session |
 | `GET /permissions?status=` | — | `status` one of `pending\|allowed\|denied\|timeout` |

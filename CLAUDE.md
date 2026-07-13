@@ -89,6 +89,8 @@ REST under `/api/v1`: health, sessions (+events, +prompt, +auto-continue), permi
 
 `POST /sessions` spawns a brand-new headless session (`claude -p "<prompt>"`, no `--resume`) in a given `cwd`; fire-and-forget — 202 `{spawned:true}` once `runner.startNew()` is kicked off, the session self-registers via the SessionStart hook once it starts.
 
+`GET /sessions/:id/transcript` (`src/http/transcriptRead.ts`) reads and parses the session's CC transcript JSONL at `transcript_path` so mobile can render the real conversation (user/assistant text, `tool_use`, `tool_result`) instead of just hook events. Tail read on first call, byte-offset (`afterByte`) incremental reads after that; 409 `no_transcript` if the session has no `transcript_path` or the file can't be read.
+
 ## Function 3 — limit watcher (`src/limit/`)
 
 - `usageClient.ts`: `GET api.anthropic.com/api/oauth/usage`, bearer from `~/.claude/.credentials.json` (re-read every call — CC rewrites it), header `anthropic-beta: oauth-2025-04-20`. Liberal parser (multiple key/format fallbacks). Error kinds: `auth`, `net`, `rate_limited` (429 → slow backoff).

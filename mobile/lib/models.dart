@@ -212,6 +212,41 @@ class KbNote {
   }
 }
 
+/// One entry in a session's transcript (`GET /sessions/:id/transcript`).
+/// Unlike the rest of this file, the hub sends this endpoint's JSON in
+/// camelCase, not snake_case — see cc_hub CLAUDE.md's hub API contract.
+class TranscriptEntry {
+  final String? uuid;
+  final String kind; // "user" | "assistant" | "tool_use" | "tool_result"
+  final String? text;
+  final String? toolName;
+  final String? toolInput; // JSON string, pre-truncated by the server
+  final String? toolUseId; // pairs tool_use <-> tool_result
+  final int? timestamp; // epoch ms
+
+  TranscriptEntry({
+    this.uuid,
+    required this.kind,
+    this.text,
+    this.toolName,
+    this.toolInput,
+    this.toolUseId,
+    this.timestamp,
+  });
+
+  factory TranscriptEntry.fromJson(Map<String, dynamic> json) {
+    return TranscriptEntry(
+      uuid: json['uuid'] as String?,
+      kind: _toStringOr(json['kind'], ''),
+      text: json['text'] as String?,
+      toolName: json['toolName'] as String?,
+      toolInput: json['toolInput'] as String?,
+      toolUseId: json['toolUseId'] as String?,
+      timestamp: _toInt(json['timestamp']),
+    );
+  }
+}
+
 class KbSearchResult {
   final int id;
   final String title;

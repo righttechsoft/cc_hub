@@ -1,6 +1,7 @@
-import { describe, expect, it, vi } from 'vitest';
+import { describe, expect, it, vi, afterAll, beforeAll } from 'vitest';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import Database from 'better-sqlite3';
 import { runMigrations } from '../db/migrations.js';
 import { buildApiRoutes } from './apiRoutes.js';
@@ -93,6 +94,18 @@ function fakeRunner(opts?: { atCapacity?: boolean }): IClaudeRunner & { startNew
     runningCwd: () => false,
     atCapacity: vi.fn().mockReturnValue(opts?.atCapacity ?? false),
   };
+}
+
+function insertSession(db: Database.Database, id: string, transcriptPath: string | null): void {
+  const now = Date.now();
+  const info = db
+    .prepare('INSERT INTO instances (name, cwd, alias, first_seen_at, last_seen_at) VALUES (?, ?, NULL, ?, ?)')
+    .run(`inst-${id}`, `/proj-${id}`, now, now);
+  db.prepare(
+    `INSERT INTO sessions
+      (id, instance_id, cwd, transcript_path, status, started_at, last_event_at, auto_continue, continues_today, continues_date)
+     VALUES (?, ?, '/proj', ?, 'idle', ?, ?, 1, 0, NULL)`
+  ).run(id, Number(info.lastInsertRowid), transcriptPath, now, now);
 }
 
 function buildApp(runner: IClaudeRunner) {
@@ -268,5 +281,110 @@ describe('POST /push/register', () => {
     expect(res.status).toBe(400);
     const body = (await res.json()) as { error: { code: string } };
     expect(body.error.code).toBe('bad_request');
+  });
+});
+
+describe('GET /sessions/:id/transcript', () => {
+  let dir: string;
+
+  beforeAll(() => {
+    dir = mkdtempSync(join(tmpdir(), 'cc-hub-apiroutes-transcript-'));
+  });
+
+  afterAll(() => {
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('404s for an unknown session', async () => {
+    const runner = fakeRunner();
+    const { app } = buildApp(runner);
+
+    const res = await app.request('/sessions/does-not-exist/transcript');
+
+    expect(res.status).toBe(404);
+    const body = (await res.json()) as { error: { code: string } };
+    expect(body.error.code).toBe('not_found');
+  });
+
+  it('409s when the session has no transcript_path', async () => {
+    const runner = fakeRunner();
+    const { app, db } = buildApp(runner);
+    insertSession(db, 'sess-no-transcript', null);
+
+    const res = await app.request('/sessions/sess-no-transcript/transcript');
+
+    expect(res.status).toBe(409);
+    const body = (await res.json()) as { error: { code: string } };
+    expect(body.error.code).toBe('no_transcript');
+  });
+
+  it('409s when the transcript file cannot be read', async () => {
+    const runner = fakeRunner();
+    const { app, db } = buildApp(runner);
+    insertSession(db, 'sess-missing-file', join(dir, 'does-not-exist.jsonl'));
+
+    const res = await app.request('/sessions/sess-missing-file/transcript');
+
+    expect(res.status).toBe(409);
+    const body = (await res.json()) as { error: { code: string; message: string } };
+    expect(body.error.code).toBe('no_transcript');
+  });
+
+  it('200s on the happy path with parsed entries', async () => {
+    const runner = fakeRunner();
+    const { app, db } = buildApp(runner);
+    const transcriptPath = join(dir, 'happy.jsonl');
+    writeFileSync(
+      transcriptPath,
+      [
+        JSON.stringify({ uuid: 'u1', type: 'user', timestamp: '2024-01-01T00:00:00.000Z', message: { content: 'hello' } }),
+        JSON.stringify({
+          uuid: 'a1',
+          type: 'assistant',
+          timestamp: '2024-01-01T00:00:01.000Z',
+          message: { content: [{ type: 'text', text: 'hi there' }] },
+        }),
+      ].join('\n') + '\n',
+      'utf8'
+    );
+    insertSession(db, 'sess-happy', transcriptPath);
+
+    const res = await app.request('/sessions/sess-happy/transcript');
+
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { entries: unknown[]; byteOffset: number; truncatedHead: boolean };
+    expect(body.entries).toHaveLength(2);
+    expect(body.truncatedHead).toBe(false);
+    expect(typeof body.byteOffset).toBe('number');
+  });
+
+  it('afterByte round-trips: a second call with the previous byteOffset returns only newly appended entries', async () => {
+    const runner = fakeRunner();
+    const { app, db } = buildApp(runner);
+    const transcriptPath = join(dir, 'roundtrip.jsonl');
+    writeFileSync(
+      transcriptPath,
+      JSON.stringify({ uuid: 'r1', type: 'user', message: { content: 'first' } }) + '\n',
+      'utf8'
+    );
+    insertSession(db, 'sess-roundtrip', transcriptPath);
+
+    const firstRes = await app.request('/sessions/sess-roundtrip/transcript');
+    const first = (await firstRes.json()) as { entries: { uuid: string }[]; byteOffset: number };
+    expect(first.entries.map((e) => e.uuid)).toEqual(['r1']);
+
+    writeFileSync(
+      transcriptPath,
+      JSON.stringify({ uuid: 'r1', type: 'user', message: { content: 'first' } }) +
+        '\n' +
+        JSON.stringify({ uuid: 'r2', type: 'user', message: { content: 'second' } }) +
+        '\n',
+      'utf8'
+    );
+
+    const secondRes = await app.request(`/sessions/sess-roundtrip/transcript?afterByte=${first.byteOffset}`);
+    expect(secondRes.status).toBe(200);
+    const second = (await secondRes.json()) as { entries: { uuid: string }[]; byteOffset: number };
+    expect(second.entries.map((e) => e.uuid)).toEqual(['r2']);
   });
 });

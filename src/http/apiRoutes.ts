@@ -23,6 +23,7 @@ import * as permissionsRepo from '../db/repo/permissions.js';
 import * as limitRepo from '../db/repo/limit.js';
 import * as pushTokensRepo from '../db/repo/pushTokens.js';
 import type { Athen } from '../kb/athen.js';
+import { readTranscript } from './transcriptRead.js';
 
 export interface BuildApiRoutesDeps {
   config: HubConfig;
@@ -194,6 +195,29 @@ export function buildApiRoutes(deps: BuildApiRoutesDeps): Hono {
     const limit = clamp(parseIntWithDefault(c.req.query('limit'), 100), 1, 500);
     const events = eventsRepo.listBySession(db, id, afterId, limit);
     return c.json({ events });
+  });
+
+  app.get('/sessions/:id/transcript', async (c) => {
+    const id = c.req.param('id');
+    const session = sessionsRepo.get(db, id);
+    if (!session) return notFound(c, 'session not found');
+    if (!session.transcript_path) {
+      return c.json({ error: { code: 'no_transcript', message: 'session has no transcript' } }, 409);
+    }
+
+    const afterByteRaw = parseOptionalInt(c.req.query('afterByte'));
+    const afterByte = afterByteRaw !== undefined && afterByteRaw >= 0 ? afterByteRaw : undefined;
+    const tailBytes = clamp(parseIntWithDefault(c.req.query('tailBytes'), 262144), 16384, 1048576);
+
+    try {
+      const result = await readTranscript(session.transcript_path, { afterByte, tailBytes });
+      return c.json(result);
+    } catch (err) {
+      return c.json(
+        { error: { code: 'no_transcript', message: err instanceof Error ? err.message : String(err) } },
+        409
+      );
+    }
   });
 
   app.post('/sessions/:id/prompt', async (c) => {

@@ -39,6 +39,41 @@ class ApiClient {
     );
   }
 
+  /// `GET /sessions/:id/transcript` — pass [tailBytes] for the first load,
+  /// [afterByte] (the previous response's byteOffset) for incremental
+  /// refetches. A 409 `no_transcript` response is a normal, typed outcome
+  /// (`available: false`) rather than a thrown exception — callers decide
+  /// whether to fall back to the event timeline; any other error (404,
+  /// network) still throws as usual.
+  Future<({List<TranscriptEntry> entries, int byteOffset, bool truncatedHead, bool available})> getTranscript(
+    String sessionId, {
+    int? afterByte,
+    int? tailBytes,
+  }) async {
+    final query = <String, String>{
+      if (afterByte != null) 'afterByte': afterByte.toString(),
+      if (afterByte == null && tailBytes != null) 'tailBytes': tailBytes.toString(),
+    };
+    try {
+      final json = await connection.request(
+        'GET',
+        '/sessions/$sessionId/transcript',
+        query: query.isEmpty ? null : query,
+      );
+      return (
+        entries: _list(json['entries']).map((e) => TranscriptEntry.fromJson(e)).toList(),
+        byteOffset: (json['byteOffset'] as num?)?.toInt() ?? 0,
+        truncatedHead: json['truncatedHead'] == true,
+        available: true,
+      );
+    } on ApiException catch (e) {
+      if (e.code == 'no_transcript') {
+        return (entries: <TranscriptEntry>[], byteOffset: 0, truncatedHead: false, available: false);
+      }
+      rethrow;
+    }
+  }
+
   Future<List<SessionEvent>> getEvents(String id, {int? afterId, int? limit}) async {
     final query = <String, String>{
       if (afterId != null) 'afterId': afterId.toString(),

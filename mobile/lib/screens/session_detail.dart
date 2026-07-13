@@ -54,14 +54,41 @@ Color _toneColor(String type, HubTokens tokens) {
   }
 }
 
-/// Session detail: header (live status via store), event timeline (backfill
-/// + live via store.eventFrames), prompt composer, auto-continue toggle.
+/// Best-effort compact one-liner for a tool_use's `toolInput` JSON string:
+/// the first non-null of a handful of common argument keys, or the raw
+/// string if it's not decodable JSON / not a map.
+String _compactToolInput(String? toolInput) {
+  if (toolInput == null || toolInput.isEmpty) return '';
+  try {
+    final decoded = jsonDecode(toolInput);
+    if (decoded is Map) {
+      for (final key in const ['command', 'file_path', 'prompt', 'pattern', 'url', 'query', 'path']) {
+        final value = decoded[key];
+        if (value != null) {
+          return value is String ? value : jsonEncode(value);
+        }
+      }
+    }
+  } catch (_) {
+    // Not JSON — fall through to the raw string.
+  }
+  return toolInput;
+}
+
+/// Default tail size for the initial transcript fetch, matching the hub API
+/// contract's example (`?tailBytes=262144`).
+const int _kTranscriptTailBytes = 262144;
+
+/// Session detail: header (live status via store), conversation view (the
+/// actual transcript — user/assistant/tool turns, like the desktop terminal)
+/// with prompt composer and auto-continue toggle.
 ///
-/// Timeline renders newest-first (matches the design): the underlying
-/// [_events] list still stores oldest-at-0/newest-appended-last exactly as
-/// before, only the ListView's `reverse: true` flag changes how it's drawn,
-/// so "newest" now visually means "top" and the jump button scrolls to
-/// offset 0 instead of the end.
+/// The conversation view is backed by `GET /sessions/:id/transcript`
+/// (tail-fetched, then polled/pushed incrementally — see [_loadTranscript]).
+/// If a transcript is unavailable (409 `no_transcript`, 404, or a network
+/// failure on the very first fetch), the screen falls back to the original
+/// hook-event timeline ([_fallbackEventTimeline]) — unchanged from before,
+/// including its own newest-first scroll behavior — behind a small banner.
 class SessionDetailScreen extends StatefulWidget {
   final String sessionId;
 
@@ -79,8 +106,19 @@ class _SessionDetailScreenState extends State<SessionDetailScreen> {
   bool _autoContinueBusy = false;
   bool _sending = false;
 
+  // Transcript (conversation) state.
+  List<TranscriptEntry> _transcriptEntries = [];
+  int? _transcriptByteOffset;
+  bool _transcriptTruncatedHead = false;
+  bool _transcriptLoading = true;
+  bool _transcriptAvailable = true; // flips false on a failed *initial* fetch
+  final Set<String> _expandedToolUseKeys = {};
+  Timer? _transcriptPollTimer;
+  Timer? _transcriptDebounce;
+
   final _promptController = TextEditingController();
-  final _scrollController = ScrollController();
+  final _scrollController = ScrollController(); // fallback event timeline
+  final _transcriptScrollController = ScrollController();
   StreamSubscription<Map<String, dynamic>>? _eventSub;
 
   @override
@@ -92,6 +130,8 @@ class _SessionDetailScreenState extends State<SessionDetailScreen> {
         .where((f) => f['sessionId'] == widget.sessionId)
         .listen(_onLiveEvent);
     _load();
+    _loadTranscript(initial: true);
+    _transcriptPollTimer = Timer.periodic(const Duration(seconds: 4), (_) => _pollTranscript());
   }
 
   Future<void> _load() async {
@@ -115,6 +155,65 @@ class _SessionDetailScreenState extends State<SessionDetailScreen> {
     }
   }
 
+  void _pollTranscript() {
+    if (!mounted || !_transcriptAvailable) return;
+    final status = context.read<HubStore>().sessions[widget.sessionId]?.status ?? _session?.status;
+    if (status != 'active') return;
+    _loadTranscript();
+  }
+
+  Future<void> _loadTranscript({bool initial = false}) async {
+    final wasNearBottom = _isTranscriptNearBottom();
+    try {
+      final result = await context.read<ApiClient>().getTranscript(
+            widget.sessionId,
+            tailBytes: initial ? _kTranscriptTailBytes : null,
+            afterByte: initial ? null : _transcriptByteOffset,
+          );
+      if (!mounted) return;
+      if (!result.available) {
+        setState(() {
+          _transcriptAvailable = false;
+          _transcriptLoading = false;
+        });
+        return;
+      }
+      setState(() {
+        _transcriptEntries = initial ? result.entries : [..._transcriptEntries, ...result.entries];
+        _transcriptByteOffset = result.byteOffset;
+        if (initial) _transcriptTruncatedHead = result.truncatedHead;
+        _transcriptAvailable = true;
+        _transcriptLoading = false;
+      });
+      if (initial || result.entries.isNotEmpty) {
+        _maybeAutoScrollTranscript(force: initial || wasNearBottom);
+      }
+    } catch (e) {
+      if (!mounted) return;
+      if (initial) {
+        setState(() {
+          _transcriptAvailable = false;
+          _transcriptLoading = false;
+        });
+      }
+      // Non-initial failures: leave state as-is, the next poll/debounce retries.
+    }
+  }
+
+  bool _isTranscriptNearBottom() {
+    if (!_transcriptScrollController.hasClients) return true;
+    final position = _transcriptScrollController.position;
+    return (position.maxScrollExtent - position.pixels) <= 100;
+  }
+
+  void _maybeAutoScrollTranscript({required bool force}) {
+    if (!force) return;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!_transcriptScrollController.hasClients) return;
+      _transcriptScrollController.jumpTo(_transcriptScrollController.position.maxScrollExtent);
+    });
+  }
+
   void _onLiveEvent(Map<String, dynamic> data) {
     final createdAt = (data['createdAt'] as num?)?.toInt() ?? DateTime.now().millisecondsSinceEpoch;
     setState(() {
@@ -127,7 +226,14 @@ class _SessionDetailScreenState extends State<SessionDetailScreen> {
         ),
       ];
     });
-    _scrollToNewestSoon();
+    if (_transcriptAvailable) {
+      _transcriptDebounce?.cancel();
+      _transcriptDebounce = Timer(const Duration(milliseconds: 500), () {
+        if (mounted) _loadTranscript();
+      });
+    } else {
+      _scrollToNewestSoon();
+    }
   }
 
   void _scrollToNewestSoon() {
@@ -202,8 +308,11 @@ class _SessionDetailScreenState extends State<SessionDetailScreen> {
   @override
   void dispose() {
     _eventSub?.cancel();
+    _transcriptPollTimer?.cancel();
+    _transcriptDebounce?.cancel();
     _promptController.dispose();
     _scrollController.dispose();
+    _transcriptScrollController.dispose();
     super.dispose();
   }
 
@@ -268,6 +377,207 @@ class _SessionDetailScreenState extends State<SessionDetailScreen> {
           ],
         ],
       ),
+    );
+  }
+
+  // ------------------------------------------------------ conversation view --
+
+  TranscriptEntry? _pairedToolResult(String? toolUseId) {
+    if (toolUseId == null) return null;
+    for (final e in _transcriptEntries) {
+      if (e.kind == 'tool_result' && e.toolUseId == toolUseId) return e;
+    }
+    return null;
+  }
+
+  Widget _conversationView(BuildContext context) {
+    final tokens = context.tokens;
+    final visible = _transcriptEntries.where((e) => e.kind != 'tool_result').toList();
+    return Column(
+      children: [
+        if (_transcriptTruncatedHead)
+          Padding(
+            padding: const EdgeInsets.fromLTRB(16, 6, 16, 0),
+            child: Text('older history not loaded', style: hubMono(size: 10, color: tokens.faint)),
+          ),
+        Expanded(
+          child: _transcriptLoading
+              ? const Center(child: CircularProgressIndicator())
+              : visible.isEmpty
+              ? Center(
+                  child: Text('No conversation yet', style: hubSans(size: 13, color: tokens.dim)),
+                )
+              : ListView.builder(
+                  controller: _transcriptScrollController,
+                  padding: const EdgeInsets.fromLTRB(16, 8, 16, 8),
+                  itemCount: visible.length,
+                  itemBuilder: (context, index) => _conversationRow(context, visible[index]),
+                ),
+        ),
+      ],
+    );
+  }
+
+  Widget _conversationRow(BuildContext context, TranscriptEntry e) {
+    switch (e.kind) {
+      case 'user':
+        return _userRow(context, e);
+      case 'assistant':
+        return _assistantRow(context, e);
+      case 'tool_use':
+        return _toolUseRow(context, e);
+      default:
+        return const SizedBox.shrink();
+    }
+  }
+
+  Widget _userRow(BuildContext context, TranscriptEntry e) {
+    final tokens = context.tokens;
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 7),
+      child: SelectableText.rich(
+        TextSpan(
+          children: [
+            TextSpan(
+              text: '❯ ',
+              style: hubSans(size: 13, weight: FontWeight.w700, color: tokens.accent),
+            ),
+            TextSpan(
+              text: e.text ?? '',
+              style: hubSans(size: 13, weight: FontWeight.w600, color: tokens.text, height: 1.4),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _assistantRow(BuildContext context, TranscriptEntry e) {
+    final tokens = context.tokens;
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 7),
+      child: SelectableText(
+        e.text ?? '',
+        style: hubSans(size: 13, color: tokens.text, height: 1.45),
+      ),
+    );
+  }
+
+  Widget _toolUseRow(BuildContext context, TranscriptEntry e) {
+    final tokens = context.tokens;
+    final key = e.toolUseId ?? e.uuid ?? e.hashCode.toString();
+    final expanded = _expandedToolUseKeys.contains(key);
+    final result = _pairedToolResult(e.toolUseId);
+
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 4),
+      child: InkWell(
+        onTap: () => setState(() {
+          if (expanded) {
+            _expandedToolUseKeys.remove(key);
+          } else {
+            _expandedToolUseKeys.add(key);
+          }
+        }),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              '● ${e.toolName ?? 'tool'}: ${_compactToolInput(e.toolInput)}',
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: hubMono(size: 11.5, color: tokens.dim),
+            ),
+            if (expanded) ...[
+              const SizedBox(height: 5),
+              Container(
+                width: double.infinity,
+                padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 7),
+                decoration: BoxDecoration(
+                  color: tokens.surface,
+                  border: Border.all(color: tokens.border),
+                  borderRadius: BorderRadius.circular(kRadiusCard),
+                ),
+                child: SelectableText(
+                  e.toolInput ?? '',
+                  style: hubMono(size: 10.5, color: tokens.dim),
+                ),
+              ),
+              if (result?.text != null && result!.text!.isNotEmpty) ...[
+                const SizedBox(height: 5),
+                SelectableText(
+                  result.text!,
+                  style: hubMono(size: 10.5, color: tokens.faint),
+                ),
+              ],
+            ],
+          ],
+        ),
+      ),
+    );
+  }
+
+  // ------------------------------------------------------- fallback view --
+
+  Widget _fallbackEventTimeline(BuildContext context) {
+    final tokens = context.tokens;
+    return Column(
+      children: [
+        Padding(
+          padding: const EdgeInsets.fromLTRB(16, 6, 16, 0),
+          child: Text(
+            'showing hook events — transcript unavailable',
+            style: hubSans(size: 11, color: tokens.faint),
+          ),
+        ),
+        Expanded(
+          child: Stack(
+            children: [
+              _events.isEmpty
+                  ? Center(
+                      child: Text('No events yet', style: hubSans(size: 13, color: tokens.dim)),
+                    )
+                  : ListView.builder(
+                      reverse: true,
+                      controller: _scrollController,
+                      padding: const EdgeInsets.fromLTRB(16, 6, 16, 6),
+                      itemCount: _events.length,
+                      itemBuilder: (context, index) => _eventRow(context, _events[index]),
+                    ),
+              if (_events.isNotEmpty)
+                Positioned(
+                  right: 14,
+                  bottom: 14,
+                  child: GestureDetector(
+                    onTap: _jumpToNewest,
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 11, vertical: 6),
+                      decoration: BoxDecoration(
+                        color: tokens.accent,
+                        borderRadius: BorderRadius.circular(999),
+                        boxShadow: [
+                          BoxShadow(
+                            color: Colors.black.withValues(alpha: 0.35),
+                            blurRadius: 16,
+                            offset: const Offset(0, 6),
+                          ),
+                        ],
+                      ),
+                      child: Text(
+                        '↑ Newest',
+                        style: hubSans(
+                          size: 11,
+                          weight: FontWeight.w700,
+                          color: tokens.accentInk,
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+            ],
+          ),
+        ),
+      ],
     );
   }
 
@@ -434,51 +744,9 @@ class _SessionDetailScreenState extends State<SessionDetailScreen> {
               children: [
                 _header(context, session, liveStatus),
                 Expanded(
-                  child: Stack(
-                    children: [
-                      _events.isEmpty
-                          ? Center(
-                              child: Text('No events yet', style: hubSans(size: 13, color: tokens.dim)),
-                            )
-                          : ListView.builder(
-                              reverse: true,
-                              controller: _scrollController,
-                              padding: const EdgeInsets.fromLTRB(16, 6, 16, 6),
-                              itemCount: _events.length,
-                              itemBuilder: (context, index) => _eventRow(context, _events[index]),
-                            ),
-                      if (_events.isNotEmpty)
-                        Positioned(
-                          right: 14,
-                          bottom: 14,
-                          child: GestureDetector(
-                            onTap: _jumpToNewest,
-                            child: Container(
-                              padding: const EdgeInsets.symmetric(horizontal: 11, vertical: 6),
-                              decoration: BoxDecoration(
-                                color: tokens.accent,
-                                borderRadius: BorderRadius.circular(999),
-                                boxShadow: [
-                                  BoxShadow(
-                                    color: Colors.black.withValues(alpha: 0.35),
-                                    blurRadius: 16,
-                                    offset: const Offset(0, 6),
-                                  ),
-                                ],
-                              ),
-                              child: Text(
-                                '↑ Newest',
-                                style: hubSans(
-                                  size: 11,
-                                  weight: FontWeight.w700,
-                                  color: tokens.accentInk,
-                                ),
-                              ),
-                            ),
-                          ),
-                        ),
-                    ],
-                  ),
+                  child: _transcriptAvailable
+                      ? _conversationView(context)
+                      : _fallbackEventTimeline(context),
                 ),
                 _composer(context),
               ],
