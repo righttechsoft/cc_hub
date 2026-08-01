@@ -4,15 +4,49 @@
 // localhost WebSocket to the hub at /attach so the hub can inject remote prompts (mobile / chat)
 // as if a human pasted them in. Standalone CLI — prints plainly to the terminal, does NOT go
 // through the hub logger (src/log.ts is for the always-on hub process only).
-import { readFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { existsSync, readFileSync } from 'node:fs';
+import { delimiter, dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { parseEnv } from 'node:util';
 import WebSocket from 'ws'; // Node global WebSocket cannot set/inspect readyState the same way
 import { bracketedPaste } from './injection.js';
 
+// Light read of the hub's config.json (claudePath + port) — NOT loadConfig(), whose authToken/
+// relay/push validation would wrongly abort a launcher. cc_hub root is two dirs up from src/attach.
+function readHubConfig(): { claudePath?: string; port?: number } {
+  try {
+    const root = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
+    const c = JSON.parse(readFileSync(join(root, 'config.json'), 'utf8')) as Record<string, unknown>;
+    return {
+      claudePath: typeof c.claudePath === 'string' ? c.claudePath : undefined,
+      port: typeof c.port === 'number' ? c.port : undefined,
+    };
+  } catch {
+    return {};
+  }
+}
+
+// node-pty does NOT PATH-resolve the executable the way child_process does — a bare name spawns
+// with "File not found" on Windows. If the configured path already has a separator, use it; else
+// scan PATH (Windows PATHEXT order prefers .EXE, so `claude` → the real claude.exe, not the .cmd
+// shim node-pty can't run). Falls back to the bare name so spawn fails loudly rather than silently.
+function resolveExecutable(cmd: string): string {
+  if (cmd.includes('/') || cmd.includes('\\')) return cmd;
+  const exts = process.platform === 'win32' ? (process.env.PATHEXT || '.EXE;.CMD;.BAT').split(';') : [''];
+  for (const dir of (process.env.PATH || '').split(delimiter)) {
+    if (!dir) continue;
+    for (const ext of exts) {
+      const full = join(dir, cmd + ext);
+      if (existsSync(full)) return full;
+    }
+  }
+  return cmd;
+}
+
 const cwd = process.cwd();
-const claudePath = process.env.CC_HUB_CLAUDE || 'claude';
-const hubUrl = process.env.CC_HUB_URL || 'http://127.0.0.1:4270';
+const hubConfig = readHubConfig();
+const claudePath = resolveExecutable(process.env.CC_HUB_CLAUDE || hubConfig.claudePath || 'claude');
+const hubUrl = process.env.CC_HUB_URL || `http://127.0.0.1:${hubConfig.port ?? 4270}`;
 const heartbeatMs = Number(process.env.CC_HUB_ATTACH_HEARTBEAT_MS) || 30000;
 
 const MIN_OPEN_MS_FOR_RESET = 30_000;

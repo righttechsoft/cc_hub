@@ -1,2 +1,5 @@
 #!/usr/bin/env sh
-exec npx tsx "$(dirname "$0")/../src/attach/cli.ts" "$@"
+# Launch cc-attach using cc_hub's own tsx (not `npx tsx`, which network-fetches when run from a
+# project dir without tsx). Resolves cc_hub root relative to this script; runs in the caller's cwd.
+ROOT="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
+exec "$ROOT/node_modules/.bin/tsx" "$ROOT/src/attach/cli.ts" "$@"

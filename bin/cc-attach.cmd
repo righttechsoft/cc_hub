@@ -1,5 +1,5 @@
 @echo off
 setlocal
-set "SCRIPT_DIR=%~dp0"
-call npx tsx "%SCRIPT_DIR%..\src\attach\cli.ts" %*
+set "ROOT=%~dp0.."
+call "%ROOT%\node_modules\.bin\tsx.cmd" "%ROOT%\src\attach\cli.ts" %*
 exit /b %errorlevel%
