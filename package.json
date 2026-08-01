@@ -9,9 +9,13 @@
   "scripts": {
     "dev": "tsx watch src/index.ts",
     "start": "tsx src/index.ts",
+    "attach": "tsx src/attach/cli.ts",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "setup": "node scripts/gen-token.mjs && node scripts/install-hooks.mjs"
+  },
+  "optionalDependencies": {
+    "@homebridge/node-pty-prebuilt-multiarch": "0.14.1"
   },
   "dependencies": {
     "@hono/node-server": "^1.13.7",

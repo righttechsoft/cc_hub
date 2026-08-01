@@ -8,7 +8,7 @@ import { HubBus } from '../core/bus.js';
 import * as instancesRepo from '../db/repo/instances.js';
 import * as sessionsRepo from '../db/repo/sessions.js';
 import * as messagesRepo from '../db/repo/messages.js';
-import type { HubConfig, HubEvent, IClaudeRunner, Logger, RunResult, SessionStatus } from '../types.js';
+import type { HubConfig, HubEvent, IAttachRegistry, IClaudeRunner, Logger, RunResult, SessionStatus } from '../types.js';
 
 type TickableChatDelivery = ChatDelivery & { _tick(): Promise<void> };
 
@@ -49,6 +49,7 @@ function buildConfig(opts?: Partial<HubConfig['chatDelivery']>): HubConfig {
       maxSpawnsPerInstancePerHour: 4,
       ...opts,
     },
+    attach: { enabled: true, heartbeatMs: 30_000 },
     athen: { embeddings: false, model: 'Xenova/all-MiniLM-L6-v2' },
     notifications: {
       enabled: false,
@@ -96,6 +97,23 @@ function fakeRunner(opts?: {
   };
 }
 
+// No wrapper attached by default — every existing test exercises the headless-spawn path
+// unchanged. Tests that need attach injection pass their own.
+function fakeAttach(opts?: { get?: (cwd: string) => boolean }): IAttachRegistry {
+  return {
+    register: vi.fn(),
+    unregister: vi.fn(),
+    get: (cwd: string) => (opts?.get?.(cwd) ? ({} as ReturnType<IAttachRegistry['get']>) : undefined),
+    inject: vi.fn(),
+    touch: vi.fn(),
+    count: () => 0,
+    ingestOutput: vi.fn(),
+    getRingB64: () => undefined,
+    listAttached: () => [],
+    stop: vi.fn(),
+  };
+}
+
 // startNew is fire-and-forget from tick()'s perspective (see chatDelivery.ts) — flush the
 // microtask/macrotask queue after awaiting _tick() so its .then/.catch has had a chance to run
 // before assertions that depend on it (markRead, logging).
@@ -131,9 +149,10 @@ function startDelivery(
   config: HubConfig,
   log: Logger,
   runner: IClaudeRunner = fakeRunner(),
-  bus: HubBus = new HubBus()
+  bus: HubBus = new HubBus(),
+  attach: IAttachRegistry = fakeAttach()
 ): TickableChatDelivery {
-  const cd = startChatDelivery({ db, log, config, runner, bus }) as TickableChatDelivery;
+  const cd = startChatDelivery({ db, log, config, runner, bus, attach }) as TickableChatDelivery;
   cd.stop();
   return cd;
 }

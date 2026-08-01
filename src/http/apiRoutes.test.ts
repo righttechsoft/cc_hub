@@ -46,6 +46,7 @@ function buildConfig(): HubConfig {
       tickMs: 30_000,
       maxSpawnsPerInstancePerHour: 4,
     },
+    attach: { enabled: true, heartbeatMs: 30_000 },
     athen: { embeddings: false, model: 'Xenova/all-MiniLM-L6-v2' },
     notifications: {
       enabled: false,

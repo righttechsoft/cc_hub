@@ -54,6 +54,7 @@ function buildConfig(opts?: Partial<HubConfig['notifications']>): HubConfig {
     retention: { sessionEventsDays: 14, messagesDays: 90 },
     relay: { enabled: false, url: '', secret: '' },
     chatDelivery: { enabled: true, tickMs: 30_000, maxSpawnsPerInstancePerHour: 4 },
+    attach: { enabled: true, heartbeatMs: 30_000 },
     athen: { embeddings: false, model: 'Xenova/all-MiniLM-L6-v2' },
     notifications: {
       enabled: true,

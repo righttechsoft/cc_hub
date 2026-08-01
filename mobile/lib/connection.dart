@@ -340,6 +340,19 @@ class ConnectionManager extends ChangeNotifier {
     _openWs(_activeIndex);
   }
 
+  /// Sends an arbitrary frame over the live WS socket (e.g.
+  /// `attach_subscribe`/`attach_unsubscribe`). Fire-and-forget — silently
+  /// dropped if the socket isn't currently up; callers that need it resent
+  /// after a reconnect (TerminalScreen) watch [wsStatus] themselves rather
+  /// than this method tracking delivery.
+  void sendFrame(Map<String, dynamic> frame) {
+    try {
+      _ws?.sink.add(jsonEncode(frame));
+    } catch (_) {
+      // Best-effort; a dead socket surfaces via the reconnect loop already.
+    }
+  }
+
   void disposeWs() {
     _wsClosing = true;
     _wsGeneration++; // invalidate any in-flight listeners

@@ -4,7 +4,15 @@ import { renderStopBlockPrompt } from '../core/messageFormat.js';
 import * as sessionsRepo from '../db/repo/sessions.js';
 import * as promptsRepo from '../db/repo/prompts.js';
 import * as eventsRepo from '../db/repo/events.js';
-import type { HubConfig, IClaudeRunner, IPromptDelivery, Logger, PendingPromptSource, PendingPromptStatus } from '../types.js';
+import type {
+  HubConfig,
+  IAttachRegistry,
+  IClaudeRunner,
+  IPromptDelivery,
+  Logger,
+  PendingPromptSource,
+  PendingPromptStatus,
+} from '../types.js';
 
 export interface PromptDeliveryDeps {
   db: Database.Database;
@@ -12,6 +20,7 @@ export interface PromptDeliveryDeps {
   log: Logger;
   runner: IClaudeRunner;
   config: HubConfig;
+  attach: IAttachRegistry;
 }
 
 /** Idle-session→spawn / mid-turn→queue routing for remote (mobile/limit-watcher/api) prompts. */
@@ -23,8 +32,8 @@ export class PromptDelivery implements IPromptDelivery {
     prompt: string,
     source: string,
     onSettled?: (ok: boolean) => void,
-  ): Promise<{ delivery: 'queued' | 'spawned'; pendingPromptId: number }> {
-    const { db, runner, bus, log, config } = this.deps;
+  ): Promise<{ delivery: 'queued' | 'spawned' | 'injected'; pendingPromptId: number }> {
+    const { db, runner, bus, log, config, attach } = this.deps;
 
     const session = sessionsRepo.getJoined(db, sessionId);
     if (!session) {
@@ -32,6 +41,44 @@ export class PromptDelivery implements IPromptDelivery {
     }
 
     const promptSource = source as PendingPromptSource;
+
+    // Idle instance with an attached wrapper terminal (see src/attach/) — inject the prompt
+    // straight into the real interactive session instead of spawning a separate headless one.
+    // limit_watcher stays on the headless path for v1 (guard below) to avoid perturbing the
+    // 'continuing' status state machine. If the wrapper has vanished, attach.inject() returns
+    // false and this falls through to the existing queue/spawn logic unchanged.
+    if (
+      source !== 'limit_watcher' &&
+      attach.get(session.cwd) &&
+      session.status !== 'active' &&
+      !runner.isRunning(sessionId) &&
+      !runner.runningCwd(session.cwd) &&
+      attach.inject(session.cwd, prompt)
+    ) {
+      const row = promptsRepo.enqueue(db, {
+        sessionId,
+        prompt,
+        source: promptSource,
+        status: 'delivering',
+        now: Date.now(),
+      });
+      promptsRepo.setStatus(db, row.id, 'delivered');
+      eventsRepo.record(db, {
+        sessionId,
+        instanceName: session.instance_name,
+        type: 'remote_prompt',
+        payload: { prompt, source: promptSource, delivery: 'injected', status: 'delivered' },
+        now: Date.now(),
+      });
+      bus.emit({
+        type: 'session_event',
+        sessionId,
+        eventType: 'remote_prompt',
+        payload: { prompt, source: promptSource, delivery: 'injected', status: 'delivered' },
+        createdAt: Date.now(),
+      });
+      return { delivery: 'injected', pendingPromptId: row.id };
+    }
 
     if (session.status === 'active' || runner.isRunning(sessionId)) {
       const row = promptsRepo.enqueue(db, {

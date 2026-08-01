@@ -1,5 +1,6 @@
 // Shared contract types for cc_hub. Every module imports from here — keep in sync with
 // src/db/migrations.ts (schema) and the plan's DB / bus sections.
+import type { WSContext } from 'hono/ws';
 
 export type SessionStatus = 'active' | 'idle' | 'ended' | 'interrupted' | 'continuing';
 
@@ -46,6 +47,10 @@ export interface HubConfig {
     enabled: boolean;
     tickMs: number;
     maxSpawnsPerInstancePerHour: number;
+  };
+  attach: {
+    enabled: boolean;
+    heartbeatMs: number;
   };
   athen: {
     // Kill switch for local embeddings (onnxruntime/sqlite-vec load failure, offline machine).
@@ -231,7 +236,9 @@ export type HubEvent =
   | { type: 'permission_request'; request: PermissionRow }
   | { type: 'permission_decided'; request: PermissionRow }
   | { type: 'limit_state'; state: LimitStateRow }
-  | { type: 'chat_delivery'; instance: string; fromNames: string[]; count: number; createdAt: number };
+  | { type: 'chat_delivery'; instance: string; fromNames: string[]; count: number; createdAt: number }
+  | { type: 'attach_output'; cwd: string; b64: string }
+  | { type: 'attach_status'; cwd: string; attached: boolean };
 
 // --- Service interfaces (seams between modules) ---
 
@@ -251,14 +258,37 @@ export interface IPromptDelivery {
   // onSettled (if provided) is invoked once the actual spawned turn finishes — with `true` if it
   // completed successfully (exit code 0) and `false` if the spawn/turn failed. It is NOT invoked
   // for a 'queued' delivery (that prompt is durably queued and will run later regardless). It is
-  // NOT invoked for a synchronous throw from send() itself (callers already see that via rejection).
+  // NOT invoked for an 'injected' delivery (no spawned turn to settle — the wrapper's own hooks
+  // report status like any other human-typed turn). It is NOT invoked for a synchronous throw
+  // from send() itself (callers already see that via rejection).
   send(
     sessionId: string,
     prompt: string,
     source: string,
     onSettled?: (ok: boolean) => void
-  ): Promise<{ delivery: 'queued' | 'spawned'; pendingPromptId: number }>;
+  ): Promise<{ delivery: 'queued' | 'spawned' | 'injected'; pendingPromptId: number }>;
   claimForStopBlock(sessionId: string): { reason: string } | undefined;
+}
+
+// An attached `cc-attach` wrapper terminal, registered by project cwd (see src/attach/).
+export interface AttachedClient {
+  ws: WSContext;
+  pid: number;
+  lastSeen: number;
+}
+
+export interface IAttachRegistry {
+  register(cwd: string, client: AttachedClient): void;
+  unregister(cwd: string, ws: WSContext): void;
+  get(cwd: string): AttachedClient | undefined;
+  inject(cwd: string, prompt: string): boolean;
+  touch(cwd: string, ws: WSContext): void;
+  count(): number;
+  // Pty output ring buffer (last 65536 bytes) per attached cwd — see src/attach/attachRegistry.ts.
+  ingestOutput(cwd: string, b64: string): void;
+  getRingB64(cwd: string): string | undefined;
+  listAttached(): string[];
+  stop(): void;
 }
 
 export interface ILimitWatcher {

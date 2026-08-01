@@ -1,6 +1,6 @@
 import { statSync } from 'node:fs';
 import type Database from 'better-sqlite3';
-import type { HubConfig, IClaudeRunner, Logger, MessageRow } from '../types.js';
+import type { HubConfig, IAttachRegistry, IClaudeRunner, Logger, MessageRow } from '../types.js';
 import { renderChatDeliveryPrompt } from '../core/messageFormat.js';
 import type { HubBus } from '../core/bus.js';
 import * as sessionsRepo from '../db/repo/sessions.js';
@@ -32,6 +32,7 @@ export interface ChatDeliveryDeps {
   config: HubConfig;
   runner: IClaudeRunner;
   bus: HubBus;
+  attach: IAttachRegistry;
 }
 
 export interface ChatDelivery {
@@ -46,7 +47,7 @@ export interface ChatDelivery {
 // repaints for a `--resume` turn either (see Limitations / the UserPromptSubmit FYI re-surface),
 // so there's no benefit to resuming one over just starting a clean session.
 export function startChatDelivery(deps: ChatDeliveryDeps): ChatDelivery {
-  const { db, log, config, runner, bus } = deps;
+  const { db, log, config, runner, bus, attach } = deps;
 
   let ticking = false;
   let stopped = false;
@@ -96,36 +97,11 @@ export function startChatDelivery(deps: ChatDeliveryDeps): ChatDelivery {
           continue;
         }
 
-        try {
-          const stat = statSync(instance.cwd);
-          if (!stat.isDirectory()) {
-            log.warn('chatDelivery: skip — instance cwd is not a directory', {
-              instance: instance.name,
-              cwd: instance.cwd,
-            });
-            continue;
-          }
-        } catch {
-          log.warn('chatDelivery: skip — instance cwd does not exist', {
-            instance: instance.name,
-            cwd: instance.cwd,
-          });
-          continue;
-        }
-
-        // Pruned to the trailing hour on every read — counts attempts, not successes (recorded at
-        // dispatch below), so a spawn that never settles can't be used to spawn unboundedly.
-        const timestamps = (spawnTimestamps.get(instance.name) ?? []).filter((t) => now - t < HOUR_MS);
-        if (timestamps.length >= config.chatDelivery.maxSpawnsPerInstancePerHour) {
-          spawnTimestamps.set(instance.name, timestamps);
-          log.debug('chatDelivery: skip — hourly spawn cap reached', { instance: instance.name });
-          continue;
-        }
-
         // unreadFor returns created_at DESC; reverse so the prompt reads chronologically.
         const ordered = [...unread].reverse();
         // Cap this tick's delivery to a char budget — the full unread set could otherwise render
-        // a prompt long enough to blow Windows' argv limit for the spawn below.
+        // a prompt long enough to blow Windows' argv limit for the spawn below (or an oversized
+        // frame for the attach WS injected path).
         const batch = batchByCharBudget(ordered);
         const messageIds = batch.map((m) => m.id);
         const instanceName = instance.name;
@@ -136,6 +112,46 @@ export function startChatDelivery(deps: ChatDeliveryDeps): ChatDelivery {
             batchCount: batch.length,
             deferredCount: ordered.length - batch.length,
           });
+        }
+
+        // Attached wrapper terminal for this cwd (see src/attach/) — inject straight into the
+        // real interactive session instead of spawning a headless one. markRead runs
+        // synchronously right after a successful inject, before the injected turn's own
+        // UserPromptSubmit hook round-trips to /hooks/event, so it's already read by the time
+        // that hook checks (see CLAUDE.md's markRead-ordering note). No 'chat_delivery' bus event
+        // here — the turn is now visible in the terminal itself, so there's nothing to toast.
+        if (attach.get(cwd)) {
+          if (attach.inject(cwd, renderChatDeliveryPrompt(batch))) {
+            messagesRepo.markRead(db, messageIds, instanceName, Date.now());
+            log.info('chatDelivery: injected into attached terminal', {
+              instance: instanceName,
+              count: messageIds.length,
+            });
+            continue;
+          }
+          log.debug('chatDelivery: attach.inject failed — falling back to headless spawn', {
+            instance: instanceName,
+          });
+        }
+
+        try {
+          const stat = statSync(cwd);
+          if (!stat.isDirectory()) {
+            log.warn('chatDelivery: skip — instance cwd is not a directory', { instance: instanceName, cwd });
+            continue;
+          }
+        } catch {
+          log.warn('chatDelivery: skip — instance cwd does not exist', { instance: instanceName, cwd });
+          continue;
+        }
+
+        // Pruned to the trailing hour on every read — counts attempts, not successes (recorded at
+        // dispatch below), so a spawn that never settles can't be used to spawn unboundedly.
+        const timestamps = (spawnTimestamps.get(instanceName) ?? []).filter((t) => now - t < HOUR_MS);
+        if (timestamps.length >= config.chatDelivery.maxSpawnsPerInstancePerHour) {
+          spawnTimestamps.set(instanceName, timestamps);
+          log.debug('chatDelivery: skip — hourly spawn cap reached', { instance: instanceName });
+          continue;
         }
 
         timestamps.push(now);

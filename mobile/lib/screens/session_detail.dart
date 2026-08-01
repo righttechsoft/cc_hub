@@ -9,6 +9,7 @@ import '../connection.dart';
 import '../models.dart';
 import '../relative_time.dart';
 import '../store.dart';
+import '../terminal_screen.dart';
 import '../theme.dart';
 import '../widgets/accent_square_button.dart';
 import '../widgets/mini_toggle.dart';
@@ -316,7 +317,7 @@ class _SessionDetailScreenState extends State<SessionDetailScreen> {
     super.dispose();
   }
 
-  Widget _header(BuildContext context, Session? session, String? liveStatus) {
+  Widget _header(BuildContext context, Session? session, String? liveStatus, bool terminalLive) {
     final tokens = context.tokens;
     return Padding(
       padding: const EdgeInsets.fromLTRB(12, 4, 12, 10),
@@ -347,6 +348,23 @@ class _SessionDetailScreenState extends State<SessionDetailScreen> {
                   ),
                 ),
               ),
+              if (session != null && terminalLive) ...[
+                const SizedBox(width: 4),
+                InkWell(
+                  onTap: () => Navigator.of(context).push(
+                    MaterialPageRoute(
+                      builder: (_) =>
+                          TerminalScreen(cwd: session.cwd, instanceName: session.instanceName),
+                    ),
+                  ),
+                  borderRadius: BorderRadius.circular(kRadiusCard),
+                  child: SizedBox(
+                    width: 30,
+                    height: 30,
+                    child: Icon(Icons.terminal, size: 18, color: tokens.stRunning),
+                  ),
+                ),
+              ],
               if (session != null) ...[
                 const SizedBox(width: 8),
                 Text('Auto', style: hubSans(size: 11, color: tokens.dim)),
@@ -727,6 +745,7 @@ class _SessionDetailScreenState extends State<SessionDetailScreen> {
     final store = context.watch<HubStore>();
     final session = _session;
     final liveStatus = store.sessions[widget.sessionId]?.status ?? session?.status;
+    final terminalLive = session != null && store.attachedCwds.contains(session.cwd);
 
     return Scaffold(
       body: SafeArea(
@@ -742,7 +761,7 @@ class _SessionDetailScreenState extends State<SessionDetailScreen> {
             )
           : Column(
               children: [
-                _header(context, session, liveStatus),
+                _header(context, session, liveStatus, terminalLive),
                 Expanded(
                   child: _transcriptAvailable
                       ? _conversationView(context)

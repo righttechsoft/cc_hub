@@ -53,7 +53,7 @@ class SessionsScreen extends StatelessWidget {
     }
   }
 
-  Widget _row(BuildContext context, Session s) {
+  Widget _row(BuildContext context, Session s, bool terminalLive) {
     final tokens = context.tokens;
     final title = (s.instanceName != null && s.instanceName!.isNotEmpty)
         ? s.instanceName!
@@ -79,11 +79,36 @@ class SessionsScreen extends StatelessWidget {
                       crossAxisAlignment: CrossAxisAlignment.start,
                       mainAxisSize: MainAxisSize.min,
                       children: [
-                        Text(
-                          title,
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                          style: hubSans(size: 14, weight: FontWeight.w600, color: tokens.text),
+                        Row(
+                          children: [
+                            Flexible(
+                              child: Text(
+                                title,
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                                style: hubSans(size: 14, weight: FontWeight.w600, color: tokens.text),
+                              ),
+                            ),
+                            if (terminalLive) ...[
+                              const SizedBox(width: 6),
+                              Container(
+                                padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1),
+                                decoration: BoxDecoration(
+                                  border: Border.all(color: tokens.stRunning),
+                                  borderRadius: BorderRadius.circular(kRadiusChip),
+                                ),
+                                child: Text(
+                                  'LIVE',
+                                  style: hubMono(
+                                    size: 8.5,
+                                    weight: FontWeight.w600,
+                                    color: tokens.stRunning,
+                                    letterSpacing: 0.4,
+                                  ),
+                                ),
+                              ),
+                            ],
+                          ],
                         ),
                         const SizedBox(height: 2),
                         Text(
@@ -142,7 +167,8 @@ class SessionsScreen extends StatelessWidget {
               )
             : ListView.builder(
                 itemCount: sessions.length,
-                itemBuilder: (context, index) => _row(context, sessions[index]),
+                itemBuilder: (context, index) =>
+                    _row(context, sessions[index], store.attachedCwds.contains(sessions[index].cwd)),
               ),
       ),
     );

@@ -77,6 +77,22 @@ Hooks and MCP config are snapshotted when a session starts. New sessions pick ev
 claude --continue
 ```
 
+### Transparent console (`cc-attach`) — mobile/chat prompts appear as if you typed them
+
+By default, a prompt sent from the mobile app or an inter-instance chat message reaches an idle session as a *separate headless* `claude` turn — it runs, but your open terminal never repaints (see **Limitations**). To make those prompts appear in your real terminal **exactly as if you typed them**, launch Claude Code through the wrapper instead of `claude`:
+
+```powershell
+# add cc_hub\bin to PATH, then in any project dir:
+cc-attach            # == `claude`, but hub-attached
+cc-attach --continue # any claude args pass straight through
+```
+
+`cc-attach` spawns `claude` inside a hub-owned pty and passes your terminal through unchanged (colors, cursor, Ctrl-C, resize all work normally). While it's running, mobile prompts and chat messages for that directory are **injected into the live session** (bracketed paste + Enter) instead of spawned headless — idle-gated, so nothing lands mid-turn. When no wrapper is attached, delivery falls back to today's headless behavior. A shell alias `claude=cc-attach` makes every session transparent with no habit change. Disable entirely with `"attach": { "enabled": false }` in `config.json`.
+
+It also loads the project's **`.env`** (from the launch directory) into the session's environment, so launched apps, bash-tool commands, and MCP servers all inherit those variables. Requires the optional `node-pty` dependency; if it isn't installed, `cc-attach` prints a notice and you just run `claude` directly.
+
+**Live terminal on your phone.** While a session runs under `cc-attach`, the mobile app can mirror its real terminal in read-only view: sessions with a live wrapper show a **LIVE** badge, and opening one streams the actual terminal (colors, spinners, output) as it happens — rendered with a real VT emulator, not the parsed transcript. Output rides the same authenticated `/ws` connection (and the relay, if enabled), streamed only to the phone while you're watching. Input still goes through the normal prompt box (which injects into the live session), so the mirror stays view-only.
+
 ## MCP tools
 
 | Tool | What it does |
@@ -264,6 +280,8 @@ There's no away-detection mechanism outside Windows — on any other platform th
 | `chatDelivery.enabled` | Master switch for chat delivery to non-active instances (default `true`) |
 | `chatDelivery.tickMs` | How often the hub checks instances with unread messages (default `30000`) |
 | `chatDelivery.maxSpawnsPerInstancePerHour` | Cap on brand-new sessions the hub will start per instance per hour (default `4`) |
+| `attach.enabled` | Master switch for the `cc-attach` transparent-console endpoint (default `true`). `false` unmounts `/attach` entirely, so delivery is pure headless fallback |
+| `attach.heartbeatMs` | Wrapper→hub ping cadence; the hub prunes an attached terminal that goes silent for > 2.5× this (default `30000`) |
 | `athen.embeddings` | Semantic search for Athen notes via local embeddings (default `true`). Kill switch: set `false` if the ONNX runtime or sqlite-vec can't load on your machine — search degrades to full-text-only |
 | `athen.model` | Embedding model id (default `Xenova/all-MiniLM-L6-v2`, ~25 MB, downloaded on first use into `data/models/`). Changing it rebuilds the vector table and re-embeds every note automatically |
 | `notifications.enabled` | Master switch for desktop toast notifications (default `true`) |
@@ -359,7 +377,7 @@ No build step — the server runs from TypeScript sources via `tsx`. SQLite data
 ## Limitations
 
 - **Instance identity is per-directory, not per-terminal.** Two terminals open in the same project directory share one inbox and one instance identity.
-- **A headless `--resume` turn does not repaint an open interactive terminal.** The turn lands in the session transcript and hooks stream it to the hub in real time, but the visible terminal won't refresh — there is no supported way to type into a running interactive terminal remotely.
+- **A headless `--resume` turn does not repaint an open interactive terminal.** The turn lands in the session transcript and hooks stream it to the hub in real time, but the visible terminal won't refresh — Claude Code exposes no supported way to type into a running interactive terminal remotely. **Workaround:** launch via `cc-attach` (see **Transparent console**), which owns the pty and injects remote/chat prompts into the live session as if typed. Without the wrapper, the headless behavior above stands.
 - **Security model is a single static bearer token, not a full auth system.** By default it's checked over plain HTTP on your LAN — adequate for a trusted home network, nothing more. The optional relay (see **Remote access**) carries the same single-bearer-token trust model onto the internet, just with the token checked at Cloudflare's edge over TLS instead of on your home network — it doesn't add per-user accounts or scoped permissions. `/hooks` and `/mcp` are additionally restricted to localhost regardless of the token, and the relay has no route to either of them.
 - **The usage endpoint (`/api/oauth/usage`) is unofficial and undocumented.** Parsing is deliberately liberal, and any failure degrades the watcher to `unknown` rather than guessing — but the endpoint may change or disappear at any time.
 - **Hook output formats drift across Claude Code versions.** The `Stop`-block and `PermissionRequest` decision shapes are pinned to current Claude Code and isolated in one function each, but a CC upgrade may require touching them.

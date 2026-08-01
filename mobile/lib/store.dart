@@ -14,6 +14,11 @@ class HubStore extends ChangeNotifier {
   List<Message> messages = []; // newest first
   LimitState? limit;
 
+  /// cwds with a currently-live terminal (seeded from `hello`'s `attached`
+  /// list, kept current by `attach_status` frames) — drives the "Live"
+  /// indicator/affordance for TerminalScreen.
+  Set<String> attachedCwds = {};
+
   static const int _maxMessages = 200;
 
   /// Wired by app startup to `ApiClient.listSessions`. Used to resync the
@@ -27,6 +32,14 @@ class HubStore extends ChangeNotifier {
   /// for a future session detail screen. Not replayed for late subscribers.
   Stream<Map<String, dynamic>> get eventFrames => _eventFrames.stream;
   final StreamController<Map<String, dynamic>> _eventFrames =
+      StreamController<Map<String, dynamic>>.broadcast();
+
+  /// Raw `attach_output` payloads (`{cwd,b64}`) for the live terminal mirror
+  /// (TerminalScreen). Not replayed for late subscribers — a screen that
+  /// starts listening late re-sends `attach_subscribe`, which makes the hub
+  /// replay scrollback, instead of relying on stream replay here.
+  Stream<Map<String, dynamic>> get attachOutputFrames => _attachOutputFrames.stream;
+  final StreamController<Map<String, dynamic>> _attachOutputFrames =
       StreamController<Map<String, dynamic>>.broadcast();
 
   void applyFrame(Map<String, dynamic> frame) {
@@ -55,6 +68,14 @@ class HubStore extends ChangeNotifier {
       case 'limit_state':
         _applyLimitState(dataMap);
         break;
+      case 'attach_status':
+        _applyAttachStatus(dataMap);
+        break;
+      case 'attach_output':
+        // Stream-only passthrough (raw terminal bytes, can arrive rapidly) —
+        // no store field changes, so skip the app-wide notifyListeners below.
+        _attachOutputFrames.add(dataMap);
+        return;
       default:
         return; // unknown/ping/pong — nothing to apply, no notify
     }
@@ -69,6 +90,19 @@ class HubStore extends ChangeNotifier {
     sessions = {for (final s in list) s.id: s};
     final limitJson = data['limit'];
     limit = limitJson is Map<String, dynamic> ? LimitState.fromJson(limitJson) : null;
+    attachedCwds = (data['attached'] as List<dynamic>? ?? []).whereType<String>().toSet();
+  }
+
+  void _applyAttachStatus(Map<String, dynamic> data) {
+    final cwd = data['cwd'] as String?;
+    if (cwd == null) return;
+    final updated = {...attachedCwds};
+    if (data['attached'] == true) {
+      updated.add(cwd);
+    } else {
+      updated.remove(cwd);
+    }
+    attachedCwds = updated;
   }
 
   void _applySessionStatus(Map<String, dynamic> data) {
@@ -200,6 +234,7 @@ class HubStore extends ChangeNotifier {
   @override
   void dispose() {
     _eventFrames.close();
+    _attachOutputFrames.close();
     super.dispose();
   }
 }

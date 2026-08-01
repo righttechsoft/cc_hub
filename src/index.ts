@@ -13,6 +13,7 @@ import * as eventsRepo from './db/repo/events.js';
 import * as messagesRepo from './db/repo/messages.js';
 import { ClaudeRunner } from './runner/claudeRunner.js';
 import { PromptDelivery } from './runner/promptDelivery.js';
+import { AttachRegistry } from './attach/attachRegistry.js';
 import { ContinuationRunner } from './limit/continuation.js';
 import { startLimitWatcher } from './limit/watcher.js';
 import { buildHooksRoutes } from './http/hooksRoutes.js';
@@ -42,14 +43,17 @@ const db = openDb(join(projectRoot, 'data', 'cc_hub.db'));
 const bus = new HubBus();
 
 const runner = new ClaudeRunner(config.claudePath, CLAUDE_RUNNER_MAX_CONCURRENT, log);
-const delivery = new PromptDelivery({ db, bus, log, runner, config });
+const attach = new AttachRegistry({ log, bus }, config.attach.heartbeatMs);
+const delivery = new PromptDelivery({ db, bus, log, runner, config, attach });
 const continuation = new ContinuationRunner({ db, bus, log, delivery, config });
 
 const watcher: ILimitWatcher | undefined = config.limitWatcher.enabled
   ? startLimitWatcher({ db, config, bus, log, continuation })
   : undefined;
 
-const chatDelivery = config.chatDelivery.enabled ? startChatDelivery({ db, log, config, runner, bus }) : undefined;
+const chatDelivery = config.chatDelivery.enabled
+  ? startChatDelivery({ db, log, config, runner, bus, attach })
+  : undefined;
 
 const desktopNotifier = config.notifications.enabled
   ? startDesktopNotifier({ db, bus, config, log })
@@ -103,6 +107,7 @@ const { app, injectWebSocket } = buildApp({
   gateway,
   delivery,
   watcher,
+  attach,
   hooksRoutes,
   apiRoutes,
 });
@@ -152,6 +157,7 @@ function shutdown(signal: string): void {
   pushNotifier?.stop();
   apnsSender?.stop();
   awayDetector?.stop();
+  attach.stop();
   athen.stop();
   db.close();
   server.close();

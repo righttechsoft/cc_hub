@@ -32,6 +32,7 @@ const defaults: HubConfig = {
     tickMs: 30000,
     maxSpawnsPerInstancePerHour: 4,
   },
+  attach: { enabled: true, heartbeatMs: 30000 },
   athen: { embeddings: true, model: 'Xenova/all-MiniLM-L6-v2' },
   notifications: {
     enabled: true,
