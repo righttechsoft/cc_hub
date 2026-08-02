@@ -81,15 +81,22 @@ claude --continue
 
 By default, a prompt sent from the mobile app or an inter-instance chat message reaches an idle session as a *separate headless* `claude` turn — it runs, but your open terminal never repaints (see **Limitations**). To make those prompts appear in your real terminal **exactly as if you typed them**, launch Claude Code through the wrapper instead of `claude`:
 
+One-time: add `cc_hub\bin` to PATH (PowerShell, persistent), then restart your terminal:
+
 ```powershell
-# add cc_hub\bin to PATH, then in any project dir:
-cc-attach            # == `claude`, but hub-attached
-cc-attach --continue # any claude args pass straight through
+[Environment]::SetEnvironmentVariable("Path", $env:Path + ";F:\rts\cc_hub\bin", "User")
 ```
 
-`cc-attach` spawns `claude` inside a hub-owned pty and passes your terminal through unchanged (colors, cursor, Ctrl-C, resize all work normally). While it's running, mobile prompts and chat messages for that directory are **injected into the live session** (bracketed paste + Enter) instead of spawned headless — idle-gated, so nothing lands mid-turn. When no wrapper is attached, delivery falls back to today's headless behavior. A shell alias `claude=cc-attach` makes every session transparent with no habit change. Disable entirely with `"attach": { "enabled": false }` in `config.json`.
+Then, with the hub running (`npm start`), launch through the wrapper in any project dir:
 
-It also loads the project's **`.env`** (from the launch directory) into the session's environment, so launched apps, bash-tool commands, and MCP servers all inherit those variables. Requires the optional `node-pty` dependency; if it isn't installed, `cc-attach` prints a notice and you just run `claude` directly.
+```powershell
+cc-attach            # == `claude`, but hub-attached
+cc-attach --continue # any claude args pass straight through (--resume <id>, -r, etc.)
+```
+
+`cc-attach` spawns `claude` inside a hub-owned pty and passes your terminal through unchanged (colors, cursor, Ctrl-C, resize all work normally). It launches the same `claude` your hub uses — it reads `claudePath` from `config.json` (and PATH-resolves a bare `claude` to the real executable). While it's running, mobile prompts and chat messages for that directory are **injected into the live session** (bracketed paste + Enter) instead of spawned headless — idle-gated, so nothing lands mid-turn. When no wrapper is attached, delivery falls back to today's headless behavior. A shell alias `claude=cc-attach` makes every session transparent with no habit change. Disable entirely with `"attach": { "enabled": false }` in `config.json`.
+
+It also loads the project's **`.env`** (from the launch directory) into the session's environment, so launched apps, bash-tool commands, and MCP servers all inherit those variables. The pty engine (`@homebridge/node-pty-prebuilt-multiarch`, a prebuilt fork of node-pty — no compiler needed) is an **optional** dependency pulled by `npm install`; if it's unavailable on your platform, `cc-attach` prints a notice and you just run `claude` directly. The hub itself never loads it, so a missing pty binary never affects the always-on hub.
 
 **Live terminal on your phone.** While a session runs under `cc-attach`, the mobile app can mirror its real terminal in read-only view: sessions with a live wrapper show a **LIVE** badge, and opening one streams the actual terminal (colors, spinners, output) as it happens — rendered with a real VT emulator, not the parsed transcript. Output rides the same authenticated `/ws` connection (and the relay, if enabled), streamed only to the phone while you're watching. Input still goes through the normal prompt box (which injects into the live session), so the mirror stays view-only.
 

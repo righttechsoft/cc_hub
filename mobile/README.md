@@ -40,6 +40,13 @@ These are stored on-device and can be changed later from the overflow menu
   shows every pending request (with tool input and a countdown) plus recent
   decision history.
 - **Chat** — direct or broadcast messages between Claude Code instances.
+- **Live terminal** — sessions launched through the `cc-attach` wrapper (see
+  the hub README's *Transparent console*) show a **LIVE** badge; open one to
+  mirror the real terminal in read-only view, rendered with a true VT emulator
+  (`xterm`) — colors, spinners, and output as they happen, not the parsed
+  transcript. Streamed over the same `/ws` connection only while you're
+  watching. Send prompts via the normal prompt box (they inject into the live
+  session); the mirror itself is view-only.
 - **Knowledge Base** — search shared notes, read them, or add new ones.
 - A connection pill in the app bar shows whether you're on LAN, on the relay,
   or offline; a limit banner appears when the hub reports anything other than
