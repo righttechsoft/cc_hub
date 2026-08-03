@@ -117,14 +117,30 @@ async function main(): Promise<void> {
   process.stdin.setRawMode?.(true);
   process.stdin.resume();
   process.stdin.on('data', (d) => pty.write(d.toString('binary')));
-  process.stdout.on('resize', () => pty.resize(process.stdout.columns || 80, process.stdout.rows || 24));
+
+  // Only resize the pty when the terminal's dimensions actually change. Windows Terminal fires
+  // 'resize' on interactions that don't change size (focus, redraw); each pty.resize() makes
+  // ConPTY reflow and repaint the whole screen, which can race the echo of a key you just typed
+  // and garble the line (stray first character).
+  let lastCols = process.stdout.columns || 80;
+  let lastRows = process.stdout.rows || 24;
+  process.stdout.on('resize', () => {
+    const cols = process.stdout.columns || 80;
+    const rows = process.stdout.rows || 24;
+    if (cols === lastCols && rows === lastRows) return;
+    lastCols = cols;
+    lastRows = rows;
+    pty.resize(cols, rows);
+  });
 
   const attach = connectAttach(pty);
-  // pty.onData is the local terminal's only output source — keep writing to process.stdout as
-  // before, and ALSO feed the hub's output coalescer as a second consumer.
+  // pty.onData is the local terminal's only output source — write it straight through, then feed
+  // the hub's mirror on a LATER tick. Doing the coalescer/WS work inline would add latency between
+  // the child's output chunks and the real terminal, making ConPTY's output burstier and racing
+  // the echo of freshly-typed input (garbled first keystroke). setImmediate preserves order.
   pty.onData((d) => {
     process.stdout.write(d);
-    attach.feedOutput(d);
+    setImmediate(() => attach.feedOutput(d));
   });
 
   pty.onExit(({ exitCode }) => {
