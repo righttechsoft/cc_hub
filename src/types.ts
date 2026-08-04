@@ -55,6 +55,12 @@ export interface HubConfig {
     // injected as a non-submitting bracketed paste, so the human reviews the transformed result.
     redactSecrets: boolean;
     fenceCodePastes: boolean;
+    // Snippets / prompt macros (see src/attach/snippets.ts): single-char key -> canned text,
+    // expanded by pressing the Ctrl+G leader then that key. Empty by default — the feature is
+    // fully inert (Ctrl+G untouched) until at least one entry is configured. Optional (rather than
+    // defaulted like its siblings above) so existing HubConfig fixtures across the test suite
+    // don't all need updating for a field only src/attach/cli.ts's own config reader consumes.
+    snippets?: Record<string, string>;
   };
   athen: {
     // Kill switch for local embeddings (onnxruntime/sqlite-vec load failure, offline machine).

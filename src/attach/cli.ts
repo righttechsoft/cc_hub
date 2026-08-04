@@ -14,6 +14,7 @@ import { readClipboardForPaste } from './clipboard.js';
 import { bracketedPaste } from './injection.js';
 import { createOutputScanner, type NoticeKind } from './outputScanner.js';
 import { applyPasteHygiene } from './pasteHygiene.js';
+import { decodeSnippetEvents, INITIAL_SNIPPET_STATE, sanitizeSnippetsConfig, stepSnippet, type SnippetState } from './snippets.js';
 
 // Diagnostic trace for the smart-paste path — appended to %TEMP%/cc-attach-debug.log. Always logs
 // the paste trigger + clipboard outcome (low volume); CC_HUB_PASTE_DEBUG=1 additionally logs every
@@ -51,10 +52,16 @@ function sweepOldPasteImages(): void {
 }
 sweepOldPasteImages();
 
-// Light read of the hub's config.json (claudePath + port + attach.redactSecrets/fenceCodePastes)
-// — NOT loadConfig(), whose authToken/relay/push validation would wrongly abort a launcher.
-// cc_hub root is two dirs up from src/attach.
-function readHubConfig(): { claudePath?: string; port?: number; redactSecrets: boolean; fenceCodePastes: boolean } {
+// Light read of the hub's config.json (claudePath + port + attach.redactSecrets/fenceCodePastes/
+// snippets) — NOT loadConfig(), whose authToken/relay/push validation would wrongly abort a
+// launcher. cc_hub root is two dirs up from src/attach.
+function readHubConfig(): {
+  claudePath?: string;
+  port?: number;
+  redactSecrets: boolean;
+  fenceCodePastes: boolean;
+  snippets: Record<string, string>;
+} {
   try {
     const root = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
     const c = JSON.parse(readFileSync(join(root, 'config.json'), 'utf8')) as Record<string, unknown>;
@@ -64,9 +71,10 @@ function readHubConfig(): { claudePath?: string; port?: number; redactSecrets: b
       port: typeof c.port === 'number' ? c.port : undefined,
       redactSecrets: typeof attach.redactSecrets === 'boolean' ? attach.redactSecrets : true,
       fenceCodePastes: typeof attach.fenceCodePastes === 'boolean' ? attach.fenceCodePastes : false,
+      snippets: sanitizeSnippetsConfig(attach.snippets),
     };
   } catch {
-    return { redactSecrets: true, fenceCodePastes: false };
+    return { redactSecrets: true, fenceCodePastes: false, snippets: {} };
   }
 }
 
@@ -97,6 +105,32 @@ const fenceCodePastes = hubConfig.fenceCodePastes;
 
 const MIN_OPEN_MS_FOR_RESET = 30_000;
 const MAX_BACKOFF_MS = 60_000;
+
+// Snippets / prompt macros: leader key (Ctrl+G) + one selector character expands to a
+// config-defined canned text (src/attach/snippets.ts has the pure leader/selector state machine).
+// Gated entirely on `snippets` being non-empty — with the default empty config.json map, `snippet`
+// is never referenced in the stdin handler below and Ctrl+G passes through completely untouched.
+const snippets = hubConfig.snippets;
+const snippetsEnabled = Object.keys(snippets).length > 0;
+const SNIPPET_LEADER_TIMEOUT_MS = 3000;
+let snippetState: SnippetState = INITIAL_SNIPPET_STATE;
+let snippetTimer: ReturnType<typeof setTimeout> | null = null;
+
+function clearSnippetTimeout(): void {
+  if (snippetTimer) {
+    clearTimeout(snippetTimer);
+    snippetTimer = null;
+  }
+}
+
+// A leader press with no selector following within 3s auto-cancels back to normal typing.
+function armSnippetTimeout(): void {
+  clearSnippetTimeout();
+  snippetTimer = setTimeout(() => {
+    snippetTimer = null;
+    snippetState = INITIAL_SNIPPET_STATE;
+  }, SNIPPET_LEADER_TIMEOUT_MS);
+}
 
 let fileEnv: Record<string, string | undefined> = {};
 try {
@@ -229,12 +263,38 @@ async function main(): Promise<void> {
       s = s.split('\x16').join('');
     }
 
+    if (snippetsEnabled) s = processSnippetChunk(s);
+
     if (s.length > 0) pty.write(s);
     if (paste) {
       dlog('smart-paste: Ctrl+V detected');
       handleSmartPaste();
     }
   });
+
+  // Leader-key (Ctrl+G) snippet expansion — runs over whatever's left after Ctrl+V has already
+  // been stripped out above (0x16 and 0x07 are distinct bytes/Uc values, so the two interceptors
+  // never see each other's markers). Only called when `snippetsEnabled`, so this whole path is
+  // dead code with the default empty snippets config. Guarded so a bug here can never swallow or
+  // corrupt normal typing — on any error, the chunk is forwarded exactly as received.
+  function processSnippetChunk(s: string): string {
+    try {
+      let forward = '';
+      for (const event of decodeSnippetEvents(s)) {
+        const step = stepSnippet(snippetState, event, snippets);
+        forward += step.forward;
+        if (step.inject !== undefined) pty.write(bracketedPaste(step.inject, { submit: false }));
+        if (step.state.awaitingKey !== snippetState.awaitingKey) {
+          if (step.state.awaitingKey) armSnippetTimeout();
+          else clearSnippetTimeout();
+        }
+        snippetState = step.state;
+      }
+      return forward;
+    } catch {
+      return s;
+    }
+  }
 
   function handleSmartPaste(): void {
     readClipboardForPaste()
