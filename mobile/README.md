@@ -34,7 +34,9 @@ These are stored on-device and can be changed later from the overflow menu
   and live-updating, matching what you'd see in the desktop terminal — send
   it a prompt, or toggle auto-continue. Falls back to the raw hook-event
   timeline if a transcript isn't available. Start a brand new session
-  remotely.
+  remotely. Attach an image (Gallery or Camera, compressed before upload) to
+  a session that's open in `cc-attach` — it's saved on the hub machine and
+  dropped into the live terminal as a file path.
 - **Permissions** — a banner surfaces the oldest pending permission request
   as soon as it comes in, with quick Allow/Deny; the full Permissions screen
   shows every pending request (with tool input and a countdown) plus recent

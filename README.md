@@ -109,6 +109,20 @@ It also loads the project's **`.env`** (from the launch directory) into the sess
 ```
 then bind `"keys": "ctrl+v"` to `"id": "User.smartPaste"`, and `"keys": "ctrl+shift+v"` to `Terminal.PasteFromClipboard`. Set `CC_HUB_PASTE_DEBUG=1` to trace paste handling to `%TEMP%\cc-attach-debug.log`.
 
+**Paste hygiene.** Smart paste also cleans up what it injects before you ever see it: by default, well-known secret shapes (API keys, GitHub/Slack/Google tokens, JWTs, PEM private-key blocks) are masked as `«REDACTED:kind»` (`"attach": { "redactSecrets": false }` to turn that off), and multi-line code pastes can optionally be wrapped in ``` fences for readability (`"attach": { "fenceCodePastes": true }`, off by default — the heuristic is conservative and leaves prose alone). Because smart paste never auto-submits, you always see the redacted/fenced result before pressing Enter.
+
+**Snippets.** Press **Ctrl+G** then a single character to expand a canned bit of text into the prompt (non-submitting, same as smart paste) — handy for a signature line, a standing instruction, anything you type often. Configure them under `attach.snippets` in `config.json`:
+
+```json
+{ "attach": { "snippets": { "s": "— Damien", "r": "Please review and suggest improvements." } } }
+```
+
+Ctrl+G is only intercepted while `attach.snippets` has at least one entry; the default `{}` means no behavior change.
+
+**Fewer false "needs input" notifications.** Under `cc-attach`, the wrapper watches for claude's own "esc to interrupt" running indicator in the terminal output and reports live working/idle state to the hub. Desktop and push notifications use that alongside session status, so an idle-input alert is suppressed while a subagent is still working in the background — previously that could fire mid-turn because the top-level session already looked idle.
+
+**Notices from your terminal.** `cc-attach` also watches the session's output for build/test failures (npm errors, `BUILD FAILED`, TypeScript/Rust/Go/Python errors, failing jest/pytest runs) and local dev-server URLs, and raises a desktop/push notification for them (`notifications.outputTriggers`, on by default) — the same event is also forwarded to the mobile app over the live connection. Repeats are deduplicated and rate-limited, so a failing watch loop or a noisy dev server can't spam you.
+
 ## MCP tools
 
 | Tool | What it does |
@@ -168,6 +182,7 @@ Base URL: `http://<lan-ip>:<port>/api/v1`. Every request needs `Authorization: B
 | `GET /sessions/:id/transcript?afterByte&tailBytes` | — | Parsed CC transcript (`{entries, byteOffset, truncatedHead}`); `afterByte` for incremental reads, `tailBytes` default 262144 (clamp 16384–1048576); 409 `no_transcript` if the session has none or it can't be read |
 | `POST /sessions/:id/prompt` | `{prompt}` | `{delivery:"spawned"\|"queued", pendingPromptId}`; 409 if session has ended |
 | `POST /sessions/:id/auto-continue` | `{enabled}` | Toggle auto-continue for one session |
+| `POST /sessions/:id/image` | `{imageBase64, ext?}` | Saves the decoded image to a temp file on the hub's machine and injects its path into the session's live `cc-attach` terminal (non-submitting) so `claude` can read it off disk; `ext` defaults to `png`. 409 `not_attached` if that session has no `cc-attach` wrapper currently open; 413 if the decoded image exceeds ~4 MB |
 | `GET /permissions?status=` | — | `status` one of `pending\|allowed\|denied\|timeout` |
 | `POST /permissions/:id/decision` | `{behavior:"allow"\|"deny", message?}` | 409 if already decided (someone else / timeout got there first) |
 | `GET /messages?limit&beforeId` | — | Chat history, newest first |
@@ -229,11 +244,12 @@ The hub raises OS toast notifications ([node-notifier](https://www.npmjs.com/pac
 | Moment | Toggle (default) | Toast |
 |---|---|---|
 | A tool call is waiting on your permission decision | `notifications.permissionRequests` (`true`) | `<instance> — permission` with the tool name and a preview of its input |
-| A session goes idle needing input (Claude Code's own "waiting" notification) | `notifications.needsInput` (`true`) | `<instance> needs input` |
+| A session goes idle needing input (Claude Code's own "waiting" notification) — suppressed while the session is mid-turn, including subagent work a `cc-attach`-attached wrapper can see but the top-level session status can't | `notifications.needsInput` (`true`) | `<instance> needs input` |
 | — filtered by an AI classifier, if enabled | `notifications.aiIdleFilter` (`false`) | Reads the session's last assistant message from its transcript and asks a small model (`notifications.aiIdleFilterModel`, default `claude-haiku-4-5`) whether it needs your action now; suppresses the toast/push only on a clean "no" (status update / completion report / background work continuing). Fails open — any error (no token, network, timeout) still notifies |
 | A turn ends | `notifications.turnEnd` (`false` — noisy if left on) | `<instance> finished a turn` |
 | The usage limit is hit, or clears back to normal | `notifications.limit` (`true`) | one toast entering the limited state, one toast on recovery — never a toast per poll tick |
 | Chat delivery spawns a headless session to process unread inter-instance mail | `notifications.chatDelivery` (`true`) | `<instance> — incoming chat` with a count and the sender name(s) |
+| A `cc-attach` session's terminal shows a build/test failure or a local dev-server URL | `notifications.outputTriggers` (`true`) | `<instance> — build failed` / `<instance> — server ready`, with the matched line or URL |
 
 `notifications.enabled: false` turns the whole feature off. Every toast call is wrapped so a notification failure (no notification daemon running, SnoreToast missing, etc.) is logged at debug level and never affects the hub itself — v1 is fire-and-forget, no click actions.
 
@@ -298,6 +314,9 @@ There's no away-detection mechanism outside Windows — on any other platform th
 | `chatDelivery.maxSpawnsPerInstancePerHour` | Cap on brand-new sessions the hub will start per instance per hour (default `4`) |
 | `attach.enabled` | Master switch for the `cc-attach` transparent-console endpoint (default `true`). `false` unmounts `/attach` entirely, so delivery is pure headless fallback |
 | `attach.heartbeatMs` | Wrapper→hub ping cadence; the hub prunes an attached terminal that goes silent for > 2.5× this (default `30000`) |
+| `attach.redactSecrets` | Smart paste masks well-known secret shapes (API keys, tokens, PEM blocks) before injecting clipboard text (default `true`) |
+| `attach.fenceCodePastes` | Smart paste wraps multi-line code pastes in ``` fences via a conservative heuristic (default `false`) |
+| `attach.snippets` | Map of single-char key → canned text; **Ctrl+G** then the key injects it as a non-submitting paste (default `{}` — Ctrl+G untouched until at least one entry is set) |
 | `athen.embeddings` | Semantic search for Athen notes via local embeddings (default `true`). Kill switch: set `false` if the ONNX runtime or sqlite-vec can't load on your machine — search degrades to full-text-only |
 | `athen.model` | Embedding model id (default `Xenova/all-MiniLM-L6-v2`, ~25 MB, downloaded on first use into `data/models/`). Changing it rebuilds the vector table and re-embeds every note automatically |
 | `notifications.enabled` | Master switch for desktop toast notifications (default `true`) |
@@ -308,6 +327,7 @@ There's no away-detection mechanism outside Windows — on any other platform th
 | `notifications.chatDelivery` | Toast/push when a hub-spawned headless session starts processing unread chat mail (default `true`) |
 | `notifications.aiIdleFilter` | Ask a small model whether a surviving `idle_prompt` notification actually needs your action, suppressing it if not (default `false`) |
 | `notifications.aiIdleFilterModel` | Model id used for that classification (default `claude-haiku-4-5`) |
+| `notifications.outputTriggers` | Toast/push when `cc-attach` detects a build/test failure or a local dev-server URL in a session's terminal output (default `true`) |
 | `push.enabled` | Master switch for APNs push notifications to registered iOS devices (default `false`) |
 | `push.awayThresholdMinutes` | Minutes of no keyboard/mouse input before the desktop user counts as "away" and pushes start firing (default `3`) |
 | `push.apns.keyPath` | Absolute path to the APNs auth key (`.p8`) downloaded from the developer portal |
