@@ -49,7 +49,7 @@ function buildConfig(opts?: Partial<HubConfig['chatDelivery']>): HubConfig {
       maxSpawnsPerInstancePerHour: 4,
       ...opts,
     },
-    attach: { enabled: true, heartbeatMs: 30_000 },
+    attach: { enabled: true, heartbeatMs: 30_000, redactSecrets: true, fenceCodePastes: false },
     athen: { embeddings: false, model: 'Xenova/all-MiniLM-L6-v2' },
     notifications: {
       enabled: false,

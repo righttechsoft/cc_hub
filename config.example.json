@@ -11,7 +11,7 @@
   "retention": { "sessionEventsDays": 14, "messagesDays": 90 },
   "relay": { "enabled": false, "url": "", "secret": "" },
   "chatDelivery": { "enabled": true, "tickMs": 30000, "maxSpawnsPerInstancePerHour": 4 },
-  "attach": { "enabled": true, "heartbeatMs": 30000 },
+  "attach": { "enabled": true, "heartbeatMs": 30000, "redactSecrets": true, "fenceCodePastes": false },
   "athen": { "embeddings": true, "model": "Xenova/all-MiniLM-L6-v2" },
   "notifications": { "enabled": true, "permissionRequests": true, "needsInput": true, "turnEnd": false, "limit": true,
                     "chatDelivery": true, "aiIdleFilter": false, "aiIdleFilterModel": "claude-haiku-4-5" },

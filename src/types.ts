@@ -51,6 +51,10 @@ export interface HubConfig {
   attach: {
     enabled: boolean;
     heartbeatMs: number;
+    // Smart-paste hygiene (see src/attach/pasteHygiene.ts) — applied to clipboard text before it's
+    // injected as a non-submitting bracketed paste, so the human reviews the transformed result.
+    redactSecrets: boolean;
+    fenceCodePastes: boolean;
   };
   athen: {
     // Kill switch for local embeddings (onnxruntime/sqlite-vec load failure, offline machine).

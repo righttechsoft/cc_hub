@@ -59,7 +59,7 @@ function buildConfig(opts?: {
       tickMs: 30000,
       maxSpawnsPerInstancePerHour: 4,
     },
-    attach: { enabled: true, heartbeatMs: 30000 },
+    attach: { enabled: true, heartbeatMs: 30000, redactSecrets: true, fenceCodePastes: false },
     athen: { embeddings: false, model: 'Xenova/all-MiniLM-L6-v2' },
     notifications: {
       enabled: false,

@@ -13,6 +13,7 @@ import WebSocket from 'ws'; // Node global WebSocket cannot set/inspect readySta
 import { readClipboardForPaste } from './clipboard.js';
 import { bracketedPaste } from './injection.js';
 import { createOutputScanner } from './outputScanner.js';
+import { applyPasteHygiene } from './pasteHygiene.js';
 
 // Diagnostic trace for the smart-paste path — appended to %TEMP%/cc-attach-debug.log. Always logs
 // the paste trigger + clipboard outcome (low volume); CC_HUB_PASTE_DEBUG=1 additionally logs every
@@ -50,18 +51,22 @@ function sweepOldPasteImages(): void {
 }
 sweepOldPasteImages();
 
-// Light read of the hub's config.json (claudePath + port) — NOT loadConfig(), whose authToken/
-// relay/push validation would wrongly abort a launcher. cc_hub root is two dirs up from src/attach.
-function readHubConfig(): { claudePath?: string; port?: number } {
+// Light read of the hub's config.json (claudePath + port + attach.redactSecrets/fenceCodePastes)
+// — NOT loadConfig(), whose authToken/relay/push validation would wrongly abort a launcher.
+// cc_hub root is two dirs up from src/attach.
+function readHubConfig(): { claudePath?: string; port?: number; redactSecrets: boolean; fenceCodePastes: boolean } {
   try {
     const root = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
     const c = JSON.parse(readFileSync(join(root, 'config.json'), 'utf8')) as Record<string, unknown>;
+    const attach = (c.attach && typeof c.attach === 'object' ? c.attach : {}) as Record<string, unknown>;
     return {
       claudePath: typeof c.claudePath === 'string' ? c.claudePath : undefined,
       port: typeof c.port === 'number' ? c.port : undefined,
+      redactSecrets: typeof attach.redactSecrets === 'boolean' ? attach.redactSecrets : true,
+      fenceCodePastes: typeof attach.fenceCodePastes === 'boolean' ? attach.fenceCodePastes : false,
     };
   } catch {
-    return {};
+    return { redactSecrets: true, fenceCodePastes: false };
   }
 }
 
@@ -87,6 +92,8 @@ const hubConfig = readHubConfig();
 const claudePath = resolveExecutable(process.env.CC_HUB_CLAUDE || hubConfig.claudePath || 'claude');
 const hubUrl = process.env.CC_HUB_URL || `http://127.0.0.1:${hubConfig.port ?? 4270}`;
 const heartbeatMs = Number(process.env.CC_HUB_ATTACH_HEARTBEAT_MS) || 30000;
+const redactSecrets = hubConfig.redactSecrets;
+const fenceCodePastes = hubConfig.fenceCodePastes;
 
 const MIN_OPEN_MS_FOR_RESET = 30_000;
 const MAX_BACKOFF_MS = 60_000;
@@ -239,7 +246,8 @@ async function main(): Promise<void> {
         // Log the kind always, but the value only under CC_HUB_PASTE_DEBUG — pasted text can
         // contain secrets and must not land in a plaintext temp log by default.
         dlog(pasteDebug ? `smart-paste: injecting ${clip.kind} — ${clip.value.slice(0, 120)}` : `smart-paste: injecting ${clip.kind}`);
-        pty.write(bracketedPaste(clip.value, { submit: false }));
+        const out = applyPasteHygiene(clip.value, { redact: redactSecrets, fence: fenceCodePastes });
+        pty.write(bracketedPaste(out, { submit: false }));
       })
       .catch((err: unknown) => {
         dlog(`smart-paste: clipboard read threw — ${err instanceof Error ? err.message : String(err)}`);
