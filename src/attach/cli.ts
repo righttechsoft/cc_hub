@@ -106,13 +106,14 @@ async function main(): Promise<void> {
     process.exit(1);
   }
 
-  // Windows default = winpty. node-pty's ConPTY maintains a virtual screen and emits re-rendered
-  // diffs; relayed through to the outer Windows Terminal (double-hosting) it desyncs the cursor
-  // right after the first keystroke (typed line renders with a stray gap / in the wrong spot).
-  // winpty pipes the child's bytes literally — no screen-diffing — which fixes it (confirmed).
-  // CC_HUB_USE_CONPTY=1 forces ConPTY back for anyone who prefers its rendering; conptyInheritCursor
-  // only matters on that path (keeps the pseudoconsole's initial cursor aligned).
-  const useConpty = process.platform === 'win32' ? process.env.CC_HUB_USE_CONPTY === '1' : true;
+  // Windows default = ConPTY. Trade-off between the two backends:
+  //   - ConPTY preserves the outer terminal's SCROLLBACK (it emits lines that scroll off the top);
+  //     conptyInheritCursor aligns the initial cursor to avoid the first-keystroke desync.
+  //   - winpty (CC_HUB_USE_WINPTY=1) pipes bytes more literally — it can fix the first-keystroke
+  //     garble — but it repaints a fixed viewport and LOSES scrollback (you can only scroll ~one
+  //     page up). Scrollback matters more, so ConPTY is the default; winpty is opt-in for anyone
+  //     who hits the input garble and can live without scrollback.
+  const useConpty = process.platform === 'win32' ? process.env.CC_HUB_USE_WINPTY !== '1' : true;
   const pty = ptyModule.spawn(claudePath, process.argv.slice(2), {
     name: 'xterm-256color',
     cols: process.stdout.columns || 80,
