@@ -82,6 +82,7 @@ interface PtyModule {
       cwd: string;
       env: NodeJS.ProcessEnv;
       useConpty?: boolean;
+      useConptyDll?: boolean;
       conptyInheritCursor?: boolean;
     }
   ): PtyProcess;
@@ -106,23 +107,43 @@ async function main(): Promise<void> {
     process.exit(1);
   }
 
-  // Windows default = ConPTY. Trade-off between the two backends:
-  //   - ConPTY preserves the outer terminal's SCROLLBACK (it emits lines that scroll off the top);
-  //     conptyInheritCursor aligns the initial cursor to avoid the first-keystroke desync.
-  //   - winpty (CC_HUB_USE_WINPTY=1) pipes bytes more literally — it can fix the first-keystroke
-  //     garble — but it repaints a fixed viewport and LOSES scrollback (you can only scroll ~one
-  //     page up). Scrollback matters more, so ConPTY is the default; winpty is opt-in for anyone
-  //     who hits the input garble and can live without scrollback.
+  // Windows backend choice:
+  //   - ConPTY (default) preserves the outer terminal's SCROLLBACK; winpty repaints a fixed
+  //     viewport and LOSES it (you can only scroll ~one page up).
+  //   - In-box ConPTY has an intermittent first-keystroke desync (a typed line renders with a
+  //     stray gap). The modern standalone **conpty.dll** (`useConptyDll`) fixes ConPTY's rendering
+  //     bugs while keeping scrollback — so it's the default, giving us both. conptyInheritCursor
+  //     aligns the initial cursor as a further guard.
+  //   - Escape hatches: CC_HUB_USE_WINPTY=1 (winpty, no scrollback, for stubborn input bugs);
+  //     CC_HUB_NO_CONPTY_DLL=1 (plain in-box ConPTY, if the dll misbehaves).
   const useConpty = process.platform === 'win32' ? process.env.CC_HUB_USE_WINPTY !== '1' : true;
-  const pty = ptyModule.spawn(claudePath, process.argv.slice(2), {
-    name: 'xterm-256color',
-    cols: process.stdout.columns || 80,
-    rows: process.stdout.rows || 24,
-    cwd,
-    env: childEnv,
-    useConpty,
-    conptyInheritCursor: true,
-  });
+  const wantConptyDll = useConpty && process.platform === 'win32' && process.env.CC_HUB_NO_CONPTY_DLL !== '1';
+
+  const spawnPty = (withDll: boolean): PtyProcess =>
+    ptyModule.spawn(claudePath, process.argv.slice(2), {
+      name: 'xterm-256color',
+      cols: process.stdout.columns || 80,
+      rows: process.stdout.rows || 24,
+      cwd,
+      env: childEnv,
+      useConpty,
+      conptyInheritCursor: true,
+      ...(withDll ? { useConptyDll: true } : {}),
+    });
+
+  let usedDll = wantConptyDll;
+  let pty: PtyProcess;
+  try {
+    pty = spawnPty(wantConptyDll);
+  } catch (err) {
+    if (!wantConptyDll) throw err;
+    // conpty.dll not available in this build — fall back to in-box ConPTY rather than dying.
+    usedDll = false;
+    pty = spawnPty(false);
+  }
+
+  const backend = process.platform !== 'win32' ? 'conpty' : !useConpty ? 'winpty' : usedDll ? 'conpty+dll' : 'conpty';
+  process.stderr.write(`cc-attach: pty backend = ${backend}\n`);
 
   function restoreTerminal(): void {
     try {
