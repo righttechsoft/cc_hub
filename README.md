@@ -102,6 +102,13 @@ It also loads the project's **`.env`** (from the launch directory) into the sess
 
 **Live terminal on your phone.** While a session runs under `cc-attach`, the mobile app can mirror its real terminal in read-only view: sessions with a live wrapper show a **LIVE** badge, and opening one streams the actual terminal (colors, spinners, output) as it happens — rendered with a real VT emulator, not the parsed transcript. Output rides the same authenticated `/ws` connection (and the relay, if enabled), streamed only to the phone while you're watching. Input still goes through the normal prompt box (which injects into the live session), so the mirror stays view-only.
 
+**Smart paste (Windows).** Windows Terminal's native Ctrl+V pastes clipboard text but bypasses the pty, so pasting an *image* does nothing. Under `cc-attach` you can rebind Ctrl+V so the wrapper reads the clipboard itself: an **image** is saved to a temp PNG and its path is dropped into the prompt, a copied **file** gives its path, and **text** pastes as usual (all non-submitting, so you review before Enter). Rebind in Windows Terminal settings (keep Ctrl+Shift+V for normal paste elsewhere):
+
+```json
+{ "command": { "action": "sendInput", "input": "\u0016" }, "id": "User.smartPaste" }
+```
+then bind `"keys": "ctrl+v"` to `"id": "User.smartPaste"`, and `"keys": "ctrl+shift+v"` to `Terminal.PasteFromClipboard`. Set `CC_HUB_PASTE_DEBUG=1` to trace paste handling to `%TEMP%\cc-attach-debug.log`.
+
 ## MCP tools
 
 | Tool | What it does |

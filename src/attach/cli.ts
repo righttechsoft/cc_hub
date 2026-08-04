@@ -4,7 +4,7 @@
 // localhost WebSocket to the hub at /attach so the hub can inject remote prompts (mobile / chat)
 // as if a human pasted them in. Standalone CLI — prints plainly to the terminal, does NOT go
 // through the hub logger (src/log.ts is for the always-on hub process only).
-import { appendFileSync, existsSync, readFileSync } from 'node:fs';
+import { appendFileSync, existsSync, readFileSync, readdirSync, statSync, unlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { delimiter, dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -25,6 +25,29 @@ function dlog(msg: string): void {
     // ignore — diagnostics must never break the wrapper
   }
 }
+
+// Best-effort cleanup of smart-paste temp images (clipboard.ts writes ccpaste_<guid>.png into
+// %TEMP%). claude reads an attached image within seconds of the paste, so anything older than a
+// day is safe to delete. Never throws — a failed sweep must not affect startup.
+const PASTE_TMP_MAX_AGE_MS = 24 * 60 * 60 * 1000;
+function sweepOldPasteImages(): void {
+  try {
+    const dir = tmpdir();
+    const now = Date.now();
+    for (const name of readdirSync(dir)) {
+      if (!/^ccpaste_[0-9a-f]+\.png$/i.test(name)) continue;
+      const full = join(dir, name);
+      try {
+        if (now - statSync(full).mtimeMs > PASTE_TMP_MAX_AGE_MS) unlinkSync(full);
+      } catch {
+        // ignore a single un-stattable/locked file
+      }
+    }
+  } catch {
+    // ignore — cleanup is best-effort
+  }
+}
+sweepOldPasteImages();
 
 // Light read of the hub's config.json (claudePath + port) — NOT loadConfig(), whose authToken/
 // relay/push validation would wrongly abort a launcher. cc_hub root is two dirs up from src/attach.
@@ -212,7 +235,9 @@ async function main(): Promise<void> {
           dlog('smart-paste: clipboard returned null (empty/unreadable)');
           return;
         }
-        dlog(`smart-paste: injecting ${clip.kind} — ${clip.value.slice(0, 120)}`);
+        // Log the kind always, but the value only under CC_HUB_PASTE_DEBUG — pasted text can
+        // contain secrets and must not land in a plaintext temp log by default.
+        dlog(pasteDebug ? `smart-paste: injecting ${clip.kind} — ${clip.value.slice(0, 120)}` : `smart-paste: injecting ${clip.kind}`);
         pty.write(bracketedPaste(clip.value, { submit: false }));
       })
       .catch((err: unknown) => {
