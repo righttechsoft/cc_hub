@@ -105,19 +105,20 @@ async function main(): Promise<void> {
     process.exit(1);
   }
 
-  // ConPTY maintains a virtual screen and emits re-rendered diffs; relaying that through to the
-  // outer Windows Terminal (a second host) can desync the cursor right after the first keystroke
-  // (a typed line renders with a stray gap / wrong spot). CC_HUB_USE_WINPTY=1 switches to winpty,
-  // which pipes the child's bytes more literally (no screen-diffing). conptyInheritCursor keeps the
-  // pseudoconsole's initial cursor aligned with the terminal so the first render doesn't jump.
-  const useWinpty = process.env.CC_HUB_USE_WINPTY === '1';
+  // Windows default = winpty. node-pty's ConPTY maintains a virtual screen and emits re-rendered
+  // diffs; relayed through to the outer Windows Terminal (double-hosting) it desyncs the cursor
+  // right after the first keystroke (typed line renders with a stray gap / in the wrong spot).
+  // winpty pipes the child's bytes literally — no screen-diffing — which fixes it (confirmed).
+  // CC_HUB_USE_CONPTY=1 forces ConPTY back for anyone who prefers its rendering; conptyInheritCursor
+  // only matters on that path (keeps the pseudoconsole's initial cursor aligned).
+  const useConpty = process.platform === 'win32' ? process.env.CC_HUB_USE_CONPTY === '1' : true;
   const pty = ptyModule.spawn(claudePath, process.argv.slice(2), {
     name: 'xterm-256color',
     cols: process.stdout.columns || 80,
     rows: process.stdout.rows || 24,
     cwd,
     env: childEnv,
-    useConpty: !useWinpty,
+    useConpty,
     conptyInheritCursor: true,
   });
 
