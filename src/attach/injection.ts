@@ -21,6 +21,9 @@ export function sanitize(prompt: string): string {
     .replace(/[\n\s]+$/g, '');
 }
 
-export function bracketedPaste(prompt: string): string {
-  return PASTE_START + sanitize(prompt) + PASTE_END + '\r';
+// opts.submit=false omits the trailing '\r' — used for smart-paste (clipboard image path / text
+// injected into the input box for the human to review, not auto-submitted).
+export function bracketedPaste(prompt: string, opts?: { submit?: boolean }): string {
+  const submit = opts?.submit ?? true;
+  return PASTE_START + sanitize(prompt) + PASTE_END + (submit ? '\r' : '');
 }

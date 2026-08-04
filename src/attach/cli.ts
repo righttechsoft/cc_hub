@@ -9,6 +9,7 @@ import { delimiter, dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseEnv } from 'node:util';
 import WebSocket from 'ws'; // Node global WebSocket cannot set/inspect readyState the same way
+import { readClipboardForPaste } from './clipboard.js';
 import { bracketedPaste } from './injection.js';
 
 // Light read of the hub's config.json (claudePath + port) — NOT loadConfig(), whose authToken/
@@ -133,7 +134,34 @@ async function main(): Promise<void> {
 
   process.stdin.setRawMode?.(true);
   process.stdin.resume();
-  process.stdin.on('data', (d) => pty.write(d.toString('binary')));
+  // Smart paste: the user rebinds Windows Terminal's Ctrl+V to send byte 0x16 (SYN) instead of
+  // its own paste, since WT's native paste bypasses the pty entirely and can't be intercepted
+  // here. On 0x16 we read the OS clipboard ourselves and inject it as a non-submitting bracketed
+  // paste (image → temp PNG path, Explorer file copy → its path, text → the text itself) so the
+  // user can review before pressing Enter. 0x16 itself is swallowed, never forwarded to the pty.
+  // Fully fail-soft: non-Windows, PowerShell missing, empty/unreadable clipboard, or any error
+  // all just no-op — normal typing and the pty are never blocked or crashed by this.
+  process.stdin.on('data', (d) => {
+    let start = 0;
+    for (let i = 0; i < d.length; i++) {
+      if (d[i] !== 0x16) continue;
+      if (i > start) pty.write(d.subarray(start, i).toString('binary'));
+      handleSmartPaste();
+      start = i + 1;
+    }
+    if (start < d.length) pty.write(d.subarray(start).toString('binary'));
+  });
+
+  function handleSmartPaste(): void {
+    readClipboardForPaste()
+      .then((clip) => {
+        if (!clip) return;
+        pty.write(bracketedPaste(clip.value, { submit: false }));
+      })
+      .catch(() => {
+        // ignore — clipboard read failed, nothing to inject
+      });
+  }
 
   // Only resize the pty when the terminal's dimensions actually change. Windows Terminal fires
   // 'resize' on interactions that don't change size (focus, redraw); each pty.resize() makes

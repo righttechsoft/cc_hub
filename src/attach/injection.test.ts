@@ -21,6 +21,19 @@ describe('bracketedPaste', () => {
   it('trims trailing newlines/whitespace before the submit', () => {
     expect(bracketedPaste('hello\n\n  \n')).toBe('\x1b[200~hello\x1b[201~\r');
   });
+
+  it('omits the trailing submit CR when submit:false', () => {
+    const result = bracketedPaste('x', { submit: false });
+    expect(result.endsWith('\x1b[201~')).toBe(true);
+    expect(result.endsWith('\r')).toBe(false);
+    expect(result).toBe('\x1b[200~x\x1b[201~');
+  });
+
+  it('passes a Windows path through unchanged (smart-paste use case)', () => {
+    const path = 'C:\\Users\\x\\ccpaste_ab.png';
+    expect(sanitize(path)).toBe(path);
+    expect(bracketedPaste(path, { submit: false })).toBe(`\x1b[200~${path}\x1b[201~`);
+  });
 });
 
 describe('sanitize', () => {
