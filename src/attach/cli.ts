@@ -177,17 +177,32 @@ async function main(): Promise<void> {
   // user can review before pressing Enter. 0x16 itself is swallowed, never forwarded to the pty.
   // Fully fail-soft: non-Windows, PowerShell missing, empty/unreadable clipboard, or any error
   // all just no-op — normal typing and the pty are never blocked or crashed by this.
+  // Ctrl+V arrives in one of two encodings depending on the pty backend, and we must strip it out
+  // (so claude never sees it) and trigger smart paste instead:
+  //   - raw byte 0x16 (SYN) — in-box ConPTY / winpty, or a WT sendInput rebind.
+  //   - a win32-input-mode key record ESC[Vk;Sc;Uc;Kd;Cs;Rc_ — conpty.dll turns win32-input-mode
+  //     on (ESC[?9001h), so keys come through encoded. Ctrl+V's unicode value is 22, so we match
+  //     Uc=22, fire on the keydown (Kd=1), and drop both the down and up records.
+  const WIN32_CTRL_V = /\x1b\[\d+;\d+;22;([01]);\d+;\d+_/g;
   process.stdin.on('data', (d) => {
     if (pasteDebug) dlog(`stdin chunk (${d.length}B): ${d.toString('hex')}`);
-    let start = 0;
-    for (let i = 0; i < d.length; i++) {
-      if (d[i] !== 0x16) continue;
-      if (i > start) pty.write(d.subarray(start, i).toString('binary'));
-      dlog('smart-paste: 0x16 (Ctrl+V) received');
-      handleSmartPaste();
-      start = i + 1;
+    let s = d.toString('binary');
+    let paste = false;
+
+    s = s.replace(WIN32_CTRL_V, (_m, kd: string) => {
+      if (kd === '1') paste = true;
+      return '';
+    });
+    if (s.indexOf('\x16') !== -1) {
+      paste = true;
+      s = s.split('\x16').join('');
     }
-    if (start < d.length) pty.write(d.subarray(start).toString('binary'));
+
+    if (s.length > 0) pty.write(s);
+    if (paste) {
+      dlog('smart-paste: Ctrl+V detected');
+      handleSmartPaste();
+    }
   });
 
   function handleSmartPaste(): void {
