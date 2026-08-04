@@ -14,7 +14,7 @@
   "attach": { "enabled": true, "heartbeatMs": 30000, "redactSecrets": true, "fenceCodePastes": false },
   "athen": { "embeddings": true, "model": "Xenova/all-MiniLM-L6-v2" },
   "notifications": { "enabled": true, "permissionRequests": true, "needsInput": true, "turnEnd": false, "limit": true,
-                    "chatDelivery": true, "aiIdleFilter": false, "aiIdleFilterModel": "claude-haiku-4-5" },
+                    "chatDelivery": true, "aiIdleFilter": false, "aiIdleFilterModel": "claude-haiku-4-5", "outputTriggers": true },
   "push": { "enabled": false, "awayThresholdMinutes": 3,
     "apns": { "keyPath": "", "keyId": "", "teamId": "", "bundleId": "com.righttechsoft.ccHubMobile", "environment": "production" } },
   "logLevel": "info"

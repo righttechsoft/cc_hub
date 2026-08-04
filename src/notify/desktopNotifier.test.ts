@@ -65,6 +65,7 @@ function buildConfig(opts?: Partial<HubConfig['notifications']>): HubConfig {
       chatDelivery: true,
       aiIdleFilter: false,
       aiIdleFilterModel: 'claude-haiku-4-5',
+      outputTriggers: true,
       ...opts,
     },
     push: {
@@ -445,6 +446,49 @@ describe('startDesktopNotifier', () => {
       count: 1,
       createdAt: Date.now(),
     });
+
+    expect(notifyMock).not.toHaveBeenCalled();
+    dn.stop();
+  });
+
+  it('toasts on attach_notice when outputTriggers is on, resolving the instance name from cwd', () => {
+    const db = buildDb();
+    insertSession(db, 'proj', 'sess-1'); // registers instance at cwd /proj-proj
+    const bus = new HubBus();
+    const dn = startDesktopNotifier({ db, bus, config: buildConfig(), log: silentLogger(), attach: fakeAttach() });
+
+    bus.emit({ type: 'attach_notice', cwd: '/proj-proj', kind: 'build_failed', text: 'npm ERR! code E404' });
+
+    expect(notifyMock).toHaveBeenCalledTimes(1);
+    const [opts] = notifyMock.mock.calls[0] as [{ title: string; message?: string }];
+    expect(opts.title).toBe('proj — build failed');
+    expect(opts.message).toBe('npm ERR! code E404');
+
+    dn.stop();
+  });
+
+  it('falls back to the cwd basename for attach_notice when no instance is registered at that cwd', () => {
+    const db = buildDb();
+    const bus = new HubBus();
+    const dn = startDesktopNotifier({ db, bus, config: buildConfig(), log: silentLogger(), attach: fakeAttach() });
+
+    bus.emit({ type: 'attach_notice', cwd: '/some/where/my-app', kind: 'url', text: 'http://localhost:5173/' });
+
+    expect(notifyMock).toHaveBeenCalledTimes(1);
+    const [opts] = notifyMock.mock.calls[0] as [{ title: string; message?: string }];
+    expect(opts.title).toBe('my-app — server ready');
+    expect(opts.message).toBe('http://localhost:5173/');
+
+    dn.stop();
+  });
+
+  it('does not toast on attach_notice when notifications.outputTriggers is off', () => {
+    const db = buildDb();
+    insertSession(db, 'proj', 'sess-1');
+    const bus = new HubBus();
+    const dn = startDesktopNotifier({ db, bus, config: buildConfig({ outputTriggers: false }), log: silentLogger(), attach: fakeAttach() });
+
+    bus.emit({ type: 'attach_notice', cwd: '/proj-proj', kind: 'build_failed', text: 'npm ERR! code E404' });
 
     expect(notifyMock).not.toHaveBeenCalled();
     dn.stop();

@@ -71,6 +71,9 @@ export interface BuildAppDeps {
   apiRoutes: Hono;
 }
 
+const NOTICE_KINDS = new Set(['build_failed', 'url']);
+const NOTICE_TEXT_MAX_CHARS = 300;
+
 function isRecord(v: unknown): v is Record<string, unknown> {
   return typeof v === 'object' && v !== null;
 }
@@ -158,6 +161,13 @@ export function buildApp(deps: BuildAppDeps): BuiltApp {
 
           if (parsed.t === 'working' && typeof parsed.on === 'boolean') {
             if (registeredCwd) attach.setWorking(registeredCwd, parsed.on);
+            return;
+          }
+
+          if (parsed.t === 'notice' && typeof parsed.kind === 'string' && typeof parsed.text === 'string') {
+            if (registeredCwd && NOTICE_KINDS.has(parsed.kind)) {
+              bus.emit({ type: 'attach_notice', cwd: registeredCwd, kind: parsed.kind, text: parsed.text.slice(0, NOTICE_TEXT_MAX_CHARS) });
+            }
           }
         },
         onClose: (_evt, ws) => {

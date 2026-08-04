@@ -133,3 +133,100 @@ describe('createOutputScanner', () => {
     expect(onChange).toHaveBeenCalledTimes(1); // only the initial true — stop() cancelled the idle flip
   });
 });
+
+describe('createOutputScanner notice detection', () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('fires a build_failed notice once for each distinctive marker line', () => {
+    const markers = [
+      'npm error command failed',
+      'npm ERR! code ENOENT',
+      'BUILD FAILED (10 errors)',
+      "src/index.ts(10,5): error TS2345: Argument of type 'string' is not assignable",
+      'Traceback (most recent call last):',
+      'error[E0432]: unresolved import `foo`',
+      'FAILED (failures=1)',
+      'Tests:       1 failed, 5 passed, 6 total',
+      'FAIL src/foo.test.ts',
+      'panic: runtime error: invalid memory address or nil pointer dereference',
+      'pytest session: 1 failed, 4 passed',
+    ];
+    for (const line of markers) {
+      const onNotice = vi.fn();
+      const scanner = createOutputScanner(() => {}, { onNotice });
+      scanner.feed(`${line}\n`);
+      expect(onNotice).toHaveBeenCalledTimes(1);
+      expect(onNotice.mock.calls[0][0]).toBe('build_failed');
+      scanner.stop();
+    }
+  });
+
+  it('does not fire a notice for a plain internet URL', () => {
+    const onNotice = vi.fn();
+    const scanner = createOutputScanner(() => {}, { onNotice });
+
+    scanner.feed('Check out https://example.com for more info\n');
+
+    expect(onNotice).not.toHaveBeenCalled();
+    scanner.stop();
+  });
+
+  it('fires a url notice for a localhost dev-server URL', () => {
+    const onNotice = vi.fn();
+    const scanner = createOutputScanner(() => {}, { onNotice });
+
+    scanner.feed('  ➜  Local:   http://localhost:5173/\n');
+
+    expect(onNotice).toHaveBeenCalledWith('url', 'http://localhost:5173/');
+    scanner.stop();
+  });
+
+  it('normalizes 0.0.0.0 to localhost in the reported url text', () => {
+    const onNotice = vi.fn();
+    const scanner = createOutputScanner(() => {}, { onNotice });
+
+    scanner.feed('Server running at http://0.0.0.0:8080\n');
+
+    expect(onNotice).toHaveBeenCalledWith('url', 'http://localhost:8080');
+    scanner.stop();
+  });
+
+  it('suppresses a repeat of the same notice within the dedup window', () => {
+    vi.useFakeTimers();
+    const onNotice = vi.fn();
+    const scanner = createOutputScanner(() => {}, { onNotice });
+
+    scanner.feed('npm ERR! code E404\n');
+    expect(onNotice).toHaveBeenCalledTimes(1);
+
+    vi.advanceTimersByTime(10_000);
+    scanner.feed('npm ERR! code E404\n');
+    expect(onNotice).toHaveBeenCalledTimes(1); // still within the 30s window
+
+    vi.advanceTimersByTime(21_000); // 31s since the first sighting
+    scanner.feed('npm ERR! code E404\n');
+    expect(onNotice).toHaveBeenCalledTimes(2);
+
+    scanner.stop();
+  });
+
+  it('catches a marker split across two feed() calls via the line buffer', () => {
+    const onNotice = vi.fn();
+    const scanner = createOutputScanner(() => {}, { onNotice });
+
+    scanner.feed('npm ER');
+    scanner.feed('R! code E404\n');
+
+    expect(onNotice).toHaveBeenCalledTimes(1);
+    expect(onNotice).toHaveBeenCalledWith('build_failed', 'npm ERR! code E404');
+    scanner.stop();
+  });
+
+  it('does not call onNotice when no callback is provided', () => {
+    const scanner = createOutputScanner(() => {});
+    expect(() => scanner.feed('npm ERR! code E404\n')).not.toThrow();
+    scanner.stop();
+  });
+});

@@ -43,6 +43,7 @@ const defaults: HubConfig = {
     chatDelivery: true,
     aiIdleFilter: false,
     aiIdleFilterModel: 'claude-haiku-4-5',
+    outputTriggers: true,
   },
   push: {
     enabled: false,

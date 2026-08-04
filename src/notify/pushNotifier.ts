@@ -1,9 +1,11 @@
+import { basename } from 'node:path';
 import type Database from 'better-sqlite3';
 import type { HubConfig, HubEvent, IAttachRegistry, Logger } from '../types.js';
 import type { HubBus } from '../core/bus.js';
+import * as instancesRepo from '../db/repo/instances.js';
 import * as sessionsRepo from '../db/repo/sessions.js';
 import * as pushTokensRepo from '../db/repo/pushTokens.js';
-import { formatToolInput, truncateToast } from './desktopNotifier.js';
+import { formatToolInput, noticeKindLabel, truncateToast } from './desktopNotifier.js';
 import { shouldNotifyIdlePrompt } from './needsInputFilter.js';
 import type { AwayDetector } from './awayDetector.js';
 import type { ApnsSender } from './apns.js';
@@ -31,6 +33,11 @@ function isRecord(v: unknown): v is Record<string, unknown> {
 // the identical comment in desktopNotifier.ts.
 function resolveInstanceName(db: Database.Database, sessionId: string): string {
   return sessionsRepo.getJoined(db, sessionId)?.instance_name ?? sessionId.slice(0, 8);
+}
+
+// See the identical helper in desktopNotifier.ts — attach_notice events only carry a cwd.
+function resolveInstanceNameFromCwd(db: Database.Database, cwd: string): string {
+  return instancesRepo.byCwd(db, cwd)?.name ?? basename(cwd);
 }
 
 // Subscribes to HubBus and mirrors desktopNotifier's event selection, but sends APNs pushes
@@ -129,6 +136,12 @@ export function startPushNotifier(deps: PushNotifierDeps): PushNotifier {
           `${e.instance} — incoming chat`,
           truncateToast(`processing ${e.count} message${e.count === 1 ? '' : 's'} from ${e.fromNames.join(', ')}`)
         );
+        return;
+      }
+      case 'attach_notice': {
+        if (!config.notifications.outputTriggers) return;
+        const name = resolveInstanceNameFromCwd(db, e.cwd);
+        void pushAll(`${name} — ${noticeKindLabel(e.kind)}`, e.text);
         return;
       }
       default:

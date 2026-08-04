@@ -73,6 +73,7 @@ export interface HubConfig {
     chatDelivery: boolean;
     aiIdleFilter: boolean;
     aiIdleFilterModel: string;
+    outputTriggers: boolean;
   };
   push: {
     enabled: boolean;
@@ -242,7 +243,8 @@ export type HubEvent =
   | { type: 'limit_state'; state: LimitStateRow }
   | { type: 'chat_delivery'; instance: string; fromNames: string[]; count: number; createdAt: number }
   | { type: 'attach_output'; cwd: string; b64: string }
-  | { type: 'attach_status'; cwd: string; attached: boolean };
+  | { type: 'attach_status'; cwd: string; attached: boolean }
+  | { type: 'attach_notice'; cwd: string; kind: string; text: string };
 
 // --- Service interfaces (seams between modules) ---
 

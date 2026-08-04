@@ -12,7 +12,7 @@ import { parseEnv } from 'node:util';
 import WebSocket from 'ws'; // Node global WebSocket cannot set/inspect readyState the same way
 import { readClipboardForPaste } from './clipboard.js';
 import { bracketedPaste } from './injection.js';
-import { createOutputScanner } from './outputScanner.js';
+import { createOutputScanner, type NoticeKind } from './outputScanner.js';
 import { applyPasteHygiene } from './pasteHygiene.js';
 
 // Diagnostic trace for the smart-paste path — appended to %TEMP%/cc-attach-debug.log. Always logs
@@ -273,7 +273,9 @@ async function main(): Promise<void> {
   // Watches the same output for claude's "esc to interrupt" running indicator and reports
   // debounced working/idle transitions to the hub, so it can suppress false "needs input"
   // notifications during subagent (Task) work — see src/attach/outputScanner.ts.
-  const scanner = createOutputScanner((on) => attach.sendWorking(on));
+  const scanner = createOutputScanner((on) => attach.sendWorking(on), {
+    onNotice: (kind, text) => attach.sendNotice(kind, text),
+  });
   // pty.onData is the local terminal's only output source — write it straight through, then feed
   // the hub's mirror on a LATER tick. Doing the coalescer/WS work inline would add latency between
   // the child's output chunks and the real terminal, making ConPTY's output burstier and racing
@@ -316,7 +318,9 @@ async function main(): Promise<void> {
 // mobile prompts / chat messages here instead of spawning a headless turn. Never allowed to
 // crash the wrapper: a hub that's down or unreachable just means no injection, terminal still
 // works normally.
-function connectAttach(pty: PtyProcess): { stop(): void; feedOutput(data: string): void; sendWorking(on: boolean): void } {
+function connectAttach(
+  pty: PtyProcess
+): { stop(): void; feedOutput(data: string): void; sendWorking(on: boolean): void; sendNotice(kind: NoticeKind, text: string): void } {
   const wsUrl = hubUrl.replace(/^http/, 'ws') + '/attach';
 
   // Coalescing rule (pinned protocol): flush when buffered >= 8192 bytes OR 16ms after the first
@@ -487,6 +491,16 @@ function connectAttach(pty: PtyProcess): { stop(): void; feedOutput(data: string
         ws.send(JSON.stringify({ t: 'working', on }));
       } catch {
         // ignore — next reconnect resyncs
+      }
+    },
+    // Best-effort — if the socket is down, the notice is simply dropped (outputScanner's own
+    // dedup/rate-limit means a missed one isn't a big loss; it'll fire again on the next sighting).
+    sendNotice(kind: NoticeKind, text: string): void {
+      if (!ws || ws.readyState !== WebSocket.OPEN) return;
+      try {
+        ws.send(JSON.stringify({ t: 'notice', kind, text }));
+      } catch {
+        // ignore
       }
     },
   };

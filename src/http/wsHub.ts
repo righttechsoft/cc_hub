@@ -39,6 +39,8 @@ function toFrame(e: HubEvent): WsFrame {
       return { type: 'attach_output', data: { cwd: e.cwd, b64: e.b64 } };
     case 'attach_status':
       return { type: 'attach_status', data: { cwd: e.cwd, attached: e.attached } };
+    case 'attach_notice':
+      return { type: 'attach_notice', data: { cwd: e.cwd, kind: e.kind, text: e.text } };
     default:
       return exhaustiveCheck(e);
   }

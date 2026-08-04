@@ -57,6 +57,7 @@ function buildConfig(opts?: Partial<HubConfig['notifications']>): HubConfig {
       chatDelivery: true,
       aiIdleFilter: false,
       aiIdleFilterModel: 'claude-haiku-4-5',
+      outputTriggers: true,
       ...opts,
     },
     push: {
@@ -387,6 +388,63 @@ describe('startPushNotifier', () => {
     });
 
     bus.emit({ type: 'chat_delivery', instance: 'proj', fromNames: ['other'], count: 1, createdAt: Date.now() });
+    await tick();
+
+    expect(sender.send).not.toHaveBeenCalled();
+    pn.stop();
+  });
+
+  it('pushes on attach_notice while away when outputTriggers is on, resolving the instance name from cwd', async () => {
+    const db = buildDb();
+    insertSession(db, 'proj', 'sess-1'); // registers instance at cwd /proj-proj
+    pushTokensRepo.upsert(db, { token: 'aaaa1111', platform: 'ios', now: Date.now() });
+    const bus = new HubBus();
+    const sender = fakeSender();
+    const pn = startPushNotifier({ db, bus, config: buildConfig(), log: silentLogger(), away: fakeAway(true), sender, attach: fakeAttach() });
+
+    bus.emit({ type: 'attach_notice', cwd: '/proj-proj', kind: 'build_failed', text: 'npm ERR! code E404' });
+    await tick();
+
+    expect(sender.send).toHaveBeenCalledTimes(1);
+    const [, title, message] = sender.send.mock.calls[0] as [string, string, string | undefined];
+    expect(title).toBe('proj — build failed');
+    expect(message).toBe('npm ERR! code E404');
+
+    pn.stop();
+  });
+
+  it('does not push on attach_notice when the user is not away', async () => {
+    const db = buildDb();
+    insertSession(db, 'proj', 'sess-1');
+    pushTokensRepo.upsert(db, { token: 'aaaa1111', platform: 'ios', now: Date.now() });
+    const bus = new HubBus();
+    const sender = fakeSender();
+    const pn = startPushNotifier({ db, bus, config: buildConfig(), log: silentLogger(), away: fakeAway(false), sender, attach: fakeAttach() });
+
+    bus.emit({ type: 'attach_notice', cwd: '/proj-proj', kind: 'url', text: 'http://localhost:5173/' });
+    await tick();
+
+    expect(sender.send).not.toHaveBeenCalled();
+    pn.stop();
+  });
+
+  it('does not push on attach_notice when notifications.outputTriggers is off', async () => {
+    const db = buildDb();
+    insertSession(db, 'proj', 'sess-1');
+    pushTokensRepo.upsert(db, { token: 'aaaa1111', platform: 'ios', now: Date.now() });
+    const bus = new HubBus();
+    const sender = fakeSender();
+    const pn = startPushNotifier({
+      db,
+      bus,
+      config: buildConfig({ outputTriggers: false }),
+      log: silentLogger(),
+      away: fakeAway(true),
+      sender,
+      attach: fakeAttach(),
+    });
+
+    bus.emit({ type: 'attach_notice', cwd: '/proj-proj', kind: 'build_failed', text: 'npm ERR! code E404' });
     await tick();
 
     expect(sender.send).not.toHaveBeenCalled();

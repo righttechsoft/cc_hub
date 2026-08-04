@@ -65,6 +65,7 @@ function buildConfig(opts?: Partial<HubConfig['notifications']>): HubConfig {
       chatDelivery: true,
       aiIdleFilter: false,
       aiIdleFilterModel: 'claude-haiku-4-5',
+      outputTriggers: true,
       ...opts,
     },
     push: {
