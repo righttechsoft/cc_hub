@@ -4,13 +4,27 @@
 // localhost WebSocket to the hub at /attach so the hub can inject remote prompts (mobile / chat)
 // as if a human pasted them in. Standalone CLI — prints plainly to the terminal, does NOT go
 // through the hub logger (src/log.ts is for the always-on hub process only).
-import { existsSync, readFileSync } from 'node:fs';
+import { appendFileSync, existsSync, readFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { delimiter, dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseEnv } from 'node:util';
 import WebSocket from 'ws'; // Node global WebSocket cannot set/inspect readyState the same way
 import { readClipboardForPaste } from './clipboard.js';
 import { bracketedPaste } from './injection.js';
+
+// Diagnostic trace for the smart-paste path — appended to %TEMP%/cc-attach-debug.log. Always logs
+// the paste trigger + clipboard outcome (low volume); CC_HUB_PASTE_DEBUG=1 additionally logs every
+// raw stdin chunk as hex, to see exactly what the terminal sends on Ctrl+V. Best-effort, never throws.
+const DEBUG_LOG = join(tmpdir(), 'cc-attach-debug.log');
+const pasteDebug = process.env.CC_HUB_PASTE_DEBUG === '1';
+function dlog(msg: string): void {
+  try {
+    appendFileSync(DEBUG_LOG, `${new Date().toISOString()} ${msg}\n`);
+  } catch {
+    // ignore — diagnostics must never break the wrapper
+  }
+}
 
 // Light read of the hub's config.json (claudePath + port) — NOT loadConfig(), whose authToken/
 // relay/push validation would wrongly abort a launcher. cc_hub root is two dirs up from src/attach.
@@ -164,10 +178,12 @@ async function main(): Promise<void> {
   // Fully fail-soft: non-Windows, PowerShell missing, empty/unreadable clipboard, or any error
   // all just no-op — normal typing and the pty are never blocked or crashed by this.
   process.stdin.on('data', (d) => {
+    if (pasteDebug) dlog(`stdin chunk (${d.length}B): ${d.toString('hex')}`);
     let start = 0;
     for (let i = 0; i < d.length; i++) {
       if (d[i] !== 0x16) continue;
       if (i > start) pty.write(d.subarray(start, i).toString('binary'));
+      dlog('smart-paste: 0x16 (Ctrl+V) received');
       handleSmartPaste();
       start = i + 1;
     }
@@ -177,11 +193,15 @@ async function main(): Promise<void> {
   function handleSmartPaste(): void {
     readClipboardForPaste()
       .then((clip) => {
-        if (!clip) return;
+        if (!clip) {
+          dlog('smart-paste: clipboard returned null (empty/unreadable)');
+          return;
+        }
+        dlog(`smart-paste: injecting ${clip.kind} — ${clip.value.slice(0, 120)}`);
         pty.write(bracketedPaste(clip.value, { submit: false }));
       })
-      .catch(() => {
-        // ignore — clipboard read failed, nothing to inject
+      .catch((err: unknown) => {
+        dlog(`smart-paste: clipboard read threw — ${err instanceof Error ? err.message : String(err)}`);
       });
   }
 
