@@ -1,11 +1,14 @@
 // Mobile API (/api/v1/*). Bearer-auth is applied by app.ts; this file only implements the
 // REST surface described in the plan's "Mobile API" section.
 import { Hono, type Context } from 'hono';
-import { statSync } from 'node:fs';
-import { isAbsolute } from 'node:path';
+import { statSync, writeFileSync } from 'node:fs';
+import { isAbsolute, join } from 'node:path';
+import { randomBytes } from 'node:crypto';
+import { tmpdir } from 'node:os';
 import type Database from 'better-sqlite3';
 import type {
   HubConfig,
+  IAttachRegistry,
   IClaudeRunner,
   ILimitWatcher,
   IPromptDelivery,
@@ -24,6 +27,7 @@ import * as limitRepo from '../db/repo/limit.js';
 import * as pushTokensRepo from '../db/repo/pushTokens.js';
 import type { Athen } from '../kb/athen.js';
 import { readTranscript } from './transcriptRead.js';
+import { bracketedPaste } from '../attach/injection.js';
 
 export interface BuildApiRoutesDeps {
   config: HubConfig;
@@ -38,6 +42,8 @@ export interface BuildApiRoutesDeps {
   // Optional: nudges the idle chat delivery loop so a mobile-sent message reaches idle recipients
   // immediately instead of waiting for the next poll tick.
   pokeChatDelivery?: () => void;
+  // orchestrator: pass attach into buildApiRoutes
+  attach: IAttachRegistry;
 }
 
 function isRecord(v: unknown): v is Record<string, unknown> {
@@ -86,6 +92,13 @@ function isPermissionStatus(v: string | undefined): v is PermissionStatus {
 // well clear of Windows' ~32K argv length limit once ClaudeRunner passes it as a spawn argument.
 const MAX_PROMPT_LENGTH = 8000;
 
+// Decoded image size cap — generous enough for a compressed phone photo, small enough to keep a
+// base64 body (~1.33x on the wire) well under typical body-size limits and away from pathological
+// memory use decoding on the hub.
+const MAX_IMAGE_BYTES = 4 * 1024 * 1024;
+const DEFAULT_IMAGE_EXT = 'png';
+const IMAGE_EXT_RE = /^[a-z0-9]{1,8}$/i;
+
 const LIMIT_STATE_NAMES: readonly LimitStateName[] = ['ok', 'limited', 'waiting_reset', 'continuing', 'unknown'];
 function isLimitStateName(v: unknown): v is LimitStateName {
   return typeof v === 'string' && (LIMIT_STATE_NAMES as readonly string[]).includes(v);
@@ -106,7 +119,7 @@ async function readJsonBody(c: Context): Promise<Record<string, unknown> | undef
 }
 
 export function buildApiRoutes(deps: BuildApiRoutesDeps): Hono {
-  const { config, db, bus, log, delivery, watcher, runner, athen, startedAt, pokeChatDelivery } = deps;
+  const { config, db, bus, log, delivery, watcher, runner, athen, startedAt, pokeChatDelivery, attach } = deps;
   const app = new Hono();
 
   app.get('/health', (c) => {
@@ -254,6 +267,58 @@ export function buildApiRoutes(deps: BuildApiRoutesDeps): Hono {
 
     sessionsRepo.setAutoContinue(db, id, enabled);
     return c.json({ id, auto_continue: enabled ? 1 : 0 });
+  });
+
+  // Phone-attached images can't reach a session over stdin, so the flow is: decode the upload to
+  // a temp file on the PC, then inject that file path into the live cc-attach terminal — `claude`
+  // reads the image straight off disk, same as if a human pasted a local path.
+  app.post('/sessions/:id/image', async (c) => {
+    const id = c.req.param('id');
+    const body = await readJsonBody(c);
+    const imageBase64 = body && typeof body.imageBase64 === 'string' ? body.imageBase64 : undefined;
+    if (!imageBase64) return badRequest(c, 'imageBase64 is required');
+
+    const extRaw = body && typeof body.ext === 'string' ? body.ext : DEFAULT_IMAGE_EXT;
+    if (!IMAGE_EXT_RE.test(extRaw)) return badRequest(c, 'ext must be a short alphanumeric extension');
+    const ext = extRaw.toLowerCase();
+
+    const session = sessionsRepo.getJoined(db, id);
+    if (!session) return notFound(c, 'session not found');
+
+    if (!attach.get(session.cwd)) {
+      return c.json(
+        { error: { code: 'not_attached', message: 'Open this session with cc-attach to attach images' } },
+        409
+      );
+    }
+
+    let bytes: Buffer;
+    try {
+      bytes = Buffer.from(imageBase64, 'base64');
+    } catch {
+      return badRequest(c, 'imageBase64 is not valid base64');
+    }
+    if (bytes.length === 0) return badRequest(c, 'imageBase64 decoded to zero bytes');
+    if (bytes.length > MAX_IMAGE_BYTES) {
+      return c.json(
+        { error: { code: 'too_large', message: `image exceeds maximum size of ${MAX_IMAGE_BYTES} bytes` } },
+        413
+      );
+    }
+
+    const path = join(tmpdir(), `ccimg_${randomBytes(8).toString('hex')}.${ext}`);
+    try {
+      writeFileSync(path, bytes);
+    } catch (err) {
+      log.error('apiRoutes: failed to write attached image', {
+        sessionId: id,
+        error: err instanceof Error ? err.message : String(err),
+      });
+      return serverError(c, err);
+    }
+
+    attach.inject(session.cwd, bracketedPaste(path, { submit: false }));
+    return c.json({ attached: true, path });
   });
 
   app.get('/permissions', (c) => {

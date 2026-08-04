@@ -153,6 +153,11 @@ export function buildApp(deps: BuildAppDeps): BuiltApp {
 
           if (parsed.t === 'output' && typeof parsed.b64 === 'string') {
             if (registeredCwd) attach.ingestOutput(registeredCwd, parsed.b64);
+            return;
+          }
+
+          if (parsed.t === 'working' && typeof parsed.on === 'boolean') {
+            if (registeredCwd) attach.setWorking(registeredCwd, parsed.on);
           }
         },
         onClose: (_evt, ws) => {

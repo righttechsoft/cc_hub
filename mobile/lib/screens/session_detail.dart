@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 
 import 'package:flutter/material.dart';
+import 'package:image_picker/image_picker.dart';
 import 'package:provider/provider.dart';
 
 import '../api_client.dart';
@@ -80,6 +81,17 @@ String _compactToolInput(String? toolInput) {
 /// contract's example (`?tailBytes=262144`).
 const int _kTranscriptTailBytes = 262144;
 
+const Set<String> _kAllowedImageExts = {'png', 'jpg', 'jpeg', 'webp'};
+
+/// Extension the hub writes the temp file with — derived from the picked
+/// file's own extension (falls back to 'png' for anything unrecognized).
+String _imageExtFromPath(String path) {
+  final dot = path.lastIndexOf('.');
+  if (dot == -1 || dot == path.length - 1) return 'png';
+  final ext = path.substring(dot + 1).toLowerCase();
+  return _kAllowedImageExts.contains(ext) ? ext : 'png';
+}
+
 /// Session detail: header (live status via store), conversation view (the
 /// actual transcript — user/assistant/tool turns, like the desktop terminal)
 /// with prompt composer and auto-continue toggle.
@@ -106,6 +118,7 @@ class _SessionDetailScreenState extends State<SessionDetailScreen> {
   String? _loadError;
   bool _autoContinueBusy = false;
   bool _sending = false;
+  bool _attachingImage = false;
 
   // Transcript (conversation) state.
   List<TranscriptEntry> _transcriptEntries = [];
@@ -270,6 +283,77 @@ class _SessionDetailScreenState extends State<SessionDetailScreen> {
       showErrorSnack(context, '$e');
     } finally {
       if (mounted) setState(() => _sending = false);
+    }
+  }
+
+  /// Small Gallery/Camera picker, matching the DraggableScrollableSheet style
+  /// used elsewhere in the app (see kb.dart's note viewer).
+  Future<void> _showImageSourceMenu() async {
+    final tokens = context.tokens;
+    final source = await showModalBottomSheet<ImageSource>(
+      context: context,
+      backgroundColor: tokens.surface,
+      builder: (sheetContext) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            ListTile(
+              leading: Icon(Icons.photo_library_outlined, color: tokens.text),
+              title: Text('Gallery', style: hubSans(size: 14, color: tokens.text)),
+              onTap: () => Navigator.of(sheetContext).pop(ImageSource.gallery),
+            ),
+            ListTile(
+              leading: Icon(Icons.photo_camera_outlined, color: tokens.text),
+              title: Text('Camera', style: hubSans(size: 14, color: tokens.text)),
+              onTap: () => Navigator.of(sheetContext).pop(ImageSource.camera),
+            ),
+          ],
+        ),
+      ),
+    );
+    if (source != null) await _attachImage(source);
+  }
+
+  /// Picks + compresses an image and hands it to the hub, which writes it to
+  /// a temp file and injects the path into the session's live cc-attach
+  /// terminal (`POST /sessions/:id/image`). A 409 means the session isn't
+  /// currently open in cc-attach — nothing to inject into.
+  Future<void> _attachImage(ImageSource source) async {
+    if (_attachingImage) return;
+    // Grabbed synchronously (before any await) so this method never reads
+    // `context` across an async gap.
+    final apiClient = context.read<ApiClient>();
+    setState(() => _attachingImage = true);
+    try {
+      final picked = await ImagePicker().pickImage(
+        source: source,
+        maxWidth: 1920,
+        maxHeight: 1920,
+        imageQuality: 80,
+      );
+      if (picked == null) return; // user cancelled
+      final bytes = await picked.readAsBytes();
+      final base64Image = base64Encode(bytes);
+      final ext = _imageExtFromPath(picked.path);
+      await apiClient.attachImage(widget.sessionId, base64Image, ext);
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Image attached — check the session')),
+      );
+    } on ApiException catch (e) {
+      if (!mounted) return;
+      if (e.statusCode == 409) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Open this session in cc-attach to attach images')),
+        );
+      } else {
+        showErrorSnack(context, e.message);
+      }
+    } catch (e) {
+      if (!mounted) return;
+      showErrorSnack(context, '$e');
+    } finally {
+      if (mounted) setState(() => _attachingImage = false);
     }
   }
 
@@ -700,6 +784,21 @@ class _SessionDetailScreenState extends State<SessionDetailScreen> {
             Row(
               crossAxisAlignment: CrossAxisAlignment.end,
               children: [
+                InkWell(
+                  onTap: _attachingImage ? null : _showImageSourceMenu,
+                  borderRadius: BorderRadius.circular(kRadiusSend),
+                  child: SizedBox(
+                    width: 38,
+                    height: 38,
+                    child: _attachingImage
+                        ? Padding(
+                            padding: const EdgeInsets.all(10),
+                            child: CircularProgressIndicator(strokeWidth: 2, color: tokens.dim),
+                          )
+                        : Icon(Icons.image_outlined, size: 19, color: tokens.dim),
+                  ),
+                ),
+                const SizedBox(width: 4),
                 Expanded(
                   child: TextField(
                     controller: _promptController,

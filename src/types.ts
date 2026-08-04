@@ -288,6 +288,11 @@ export interface IAttachRegistry {
   ingestOutput(cwd: string, b64: string): void;
   getRingB64(cwd: string): string | undefined;
   listAttached(): string[];
+  // Live "is claude actively working" read reported by the wrapper's outputScanner (see
+  // src/attach/outputScanner.ts) — truer than hub-side session status during subagent (Task)
+  // work. Cleared on unregister/sweep-prune along with the rest of a cwd's attach state.
+  setWorking(cwd: string, on: boolean): void;
+  isWorking(cwd: string): boolean;
   stop(): void;
 }
 

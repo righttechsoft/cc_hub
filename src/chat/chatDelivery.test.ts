@@ -110,6 +110,8 @@ function fakeAttach(opts?: { get?: (cwd: string) => boolean }): IAttachRegistry 
     ingestOutput: vi.fn(),
     getRingB64: () => undefined,
     listAttached: () => [],
+    setWorking: vi.fn(),
+    isWorking: () => false,
     stop: vi.fn(),
   };
 }

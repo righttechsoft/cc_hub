@@ -28,6 +28,7 @@ export class AttachRegistry implements IAttachRegistry {
   private readonly heartbeatMs: number;
   private readonly clients = new Map<string, AttachedClient>();
   private readonly rings = new Map<string, Buffer>();
+  private readonly working = new Map<string, boolean>();
   private readonly sweepTimer: ReturnType<typeof setInterval>;
 
   constructor(deps: AttachRegistryDeps, heartbeatMs: number) {
@@ -55,6 +56,7 @@ export class AttachRegistry implements IAttachRegistry {
     if (existing && existing.ws === ws) {
       this.clients.delete(cwd);
       this.rings.delete(cwd);
+      this.working.delete(cwd);
       this.bus.emit({ type: 'attach_status', cwd, attached: false });
     }
   }
@@ -112,6 +114,15 @@ export class AttachRegistry implements IAttachRegistry {
     return [...this.clients.keys()];
   }
 
+  setWorking(cwd: string, on: boolean): void {
+    if (on) this.working.set(cwd, true);
+    else this.working.delete(cwd);
+  }
+
+  isWorking(cwd: string): boolean {
+    return this.working.get(cwd) === true;
+  }
+
   stop(): void {
     clearInterval(this.sweepTimer);
   }
@@ -125,6 +136,7 @@ export class AttachRegistry implements IAttachRegistry {
         this.closeQuietly(client.ws);
         this.clients.delete(cwd);
         this.rings.delete(cwd);
+        this.working.delete(cwd);
         this.bus.emit({ type: 'attach_status', cwd, attached: false });
       }
     }

@@ -228,4 +228,57 @@ describe('AttachRegistry', () => {
     expect(registry.listAttached().sort()).toEqual(['/proj-a', '/proj-b']);
     registry.stop();
   });
+
+  it('isWorking defaults to false for a cwd that never reported', () => {
+    const log = silentLogger();
+    const bus = fakeBus();
+    const registry = new AttachRegistry({ log, bus }, 30_000);
+
+    expect(registry.isWorking('/proj')).toBe(false);
+    registry.stop();
+  });
+
+  it('setWorking(true/false) round-trips through isWorking', () => {
+    const log = silentLogger();
+    const bus = fakeBus();
+    const registry = new AttachRegistry({ log, bus }, 30_000);
+    registry.register('/proj', fakeClient(fakeWs()));
+
+    registry.setWorking('/proj', true);
+    expect(registry.isWorking('/proj')).toBe(true);
+
+    registry.setWorking('/proj', false);
+    expect(registry.isWorking('/proj')).toBe(false);
+    registry.stop();
+  });
+
+  it('unregister clears the working flag along with the client', () => {
+    const log = silentLogger();
+    const bus = fakeBus();
+    const registry = new AttachRegistry({ log, bus }, 30_000);
+    const ws = fakeWs();
+    registry.register('/proj', fakeClient(ws));
+    registry.setWorking('/proj', true);
+
+    registry.unregister('/proj', ws);
+
+    expect(registry.isWorking('/proj')).toBe(false);
+    registry.stop();
+  });
+
+  it('sweep pruning a stale client also clears its working flag', () => {
+    vi.useFakeTimers();
+    const log = silentLogger();
+    const bus = fakeBus();
+    const heartbeatMs = 1000;
+    const registry = new AttachRegistry({ log, bus }, heartbeatMs);
+    const ws = fakeWs();
+    registry.register('/proj', fakeClient(ws, { lastSeen: Date.now() }));
+    registry.setWorking('/proj', true);
+
+    vi.advanceTimersByTime(heartbeatMs * 3);
+
+    expect(registry.isWorking('/proj')).toBe(false);
+    registry.stop();
+  });
 });

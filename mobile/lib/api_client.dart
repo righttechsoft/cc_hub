@@ -113,6 +113,26 @@ class ApiClient {
     );
   }
 
+  /// `POST /sessions/:id/image` — injects a phone-picked image into the
+  /// session's live cc-attach terminal as a pasted file path. Throws
+  /// [ApiException] with `statusCode == 409` (`not_attached`) when the
+  /// session isn't open in cc-attach.
+  Future<({bool attached, String path})> attachImage(
+    String sessionId,
+    String imageBase64,
+    String ext,
+  ) async {
+    final json = await connection.request(
+      'POST',
+      '/sessions/$sessionId/image',
+      jsonBody: {'imageBase64': imageBase64, 'ext': ext},
+    );
+    return (
+      attached: json['attached'] == true,
+      path: json['path'] as String? ?? '',
+    );
+  }
+
   Future<bool> setAutoContinue(String id, bool enabled) async {
     final json = await connection.request(
       'POST',

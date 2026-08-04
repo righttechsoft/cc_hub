@@ -56,14 +56,14 @@ const chatDelivery = config.chatDelivery.enabled
   : undefined;
 
 const desktopNotifier = config.notifications.enabled
-  ? startDesktopNotifier({ db, bus, config, log })
+  ? startDesktopNotifier({ db, bus, config, log, attach })
   : undefined;
 
 const awayDetector = config.push.enabled ? startAwayDetector({ config, log }) : undefined;
 const apnsSender = config.push.enabled ? createApnsSender({ config, log }) : undefined;
 const pushNotifier =
   awayDetector && apnsSender
-    ? startPushNotifier({ db, bus, config, log, away: awayDetector, sender: apnsSender })
+    ? startPushNotifier({ db, bus, config, log, away: awayDetector, sender: apnsSender, attach })
     : undefined;
 
 const hooksRoutes = buildHooksRoutes({
@@ -97,6 +97,7 @@ const apiRoutes = buildApiRoutes({
   athen,
   startedAt,
   pokeChatDelivery,
+  attach,
 });
 
 const { app, injectWebSocket } = buildApp({

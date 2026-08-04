@@ -4,7 +4,7 @@ import { runMigrations } from '../db/migrations.js';
 import { HubBus } from '../core/bus.js';
 import * as instancesRepo from '../db/repo/instances.js';
 import * as sessionsRepo from '../db/repo/sessions.js';
-import type { HubConfig, LimitStateRow, Logger, PermissionRow } from '../types.js';
+import type { HubConfig, IAttachRegistry, LimitStateRow, Logger, PermissionRow } from '../types.js';
 
 const notifyMock = vi.fn();
 vi.mock('node-notifier', () => ({
@@ -85,6 +85,26 @@ function silentLogger(): Logger & { debug: ReturnType<typeof vi.fn> } {
   };
 }
 
+// Stub IAttachRegistry — isWorking defaults to false (no wrapper attached / not reporting work),
+// matching pre-attach behavior. Pass { isWorking: true } to simulate the wrapper reporting an
+// active turn for a given cwd.
+function fakeAttach(opts?: { isWorking?: boolean }): IAttachRegistry {
+  return {
+    register: vi.fn(),
+    unregister: vi.fn(),
+    get: vi.fn(),
+    inject: vi.fn(() => false),
+    touch: vi.fn(),
+    count: vi.fn(() => 0),
+    ingestOutput: vi.fn(),
+    getRingB64: vi.fn(),
+    listAttached: vi.fn(() => []),
+    setWorking: vi.fn(),
+    isWorking: vi.fn(() => opts?.isWorking ?? false),
+    stop: vi.fn(),
+  } as unknown as IAttachRegistry;
+}
+
 function insertSession(db: Database.Database, instanceName: string, sessionId: string): void {
   const instanceId = instancesRepo.upsert(db, { name: instanceName, cwd: `/proj-${instanceName}`, now: Date.now() }).id;
   sessionsRepo.upsertFromHook(db, {
@@ -161,7 +181,7 @@ describe('startDesktopNotifier', () => {
     const db = buildDb();
     insertSession(db, 'proj', 'sess-1');
     const bus = new HubBus();
-    const dn = startDesktopNotifier({ db, bus, config: buildConfig(), log: silentLogger() });
+    const dn = startDesktopNotifier({ db, bus, config: buildConfig(), log: silentLogger(), attach: fakeAttach() });
 
     bus.emit({ type: 'permission_request', request: fakePermission() });
 
@@ -178,7 +198,7 @@ describe('startDesktopNotifier', () => {
     const db = buildDb();
     insertSession(db, 'proj', 'sess-1');
     const bus = new HubBus();
-    const dn = startDesktopNotifier({ db, bus, config: buildConfig({ permissionRequests: false }), log: silentLogger() });
+    const dn = startDesktopNotifier({ db, bus, config: buildConfig({ permissionRequests: false }), log: silentLogger(), attach: fakeAttach() });
 
     bus.emit({ type: 'permission_request', request: fakePermission() });
 
@@ -190,7 +210,7 @@ describe('startDesktopNotifier', () => {
     const db = buildDb();
     insertSession(db, 'proj', 'sess-1');
     const bus = new HubBus();
-    const dn = startDesktopNotifier({ db, bus, config: buildConfig(), log: silentLogger() });
+    const dn = startDesktopNotifier({ db, bus, config: buildConfig(), log: silentLogger(), attach: fakeAttach() });
 
     bus.emit({
       type: 'session_event',
@@ -212,7 +232,7 @@ describe('startDesktopNotifier', () => {
     const db = buildDb();
     insertSession(db, 'proj', 'sess-1');
     const bus = new HubBus();
-    const dn = startDesktopNotifier({ db, bus, config: buildConfig({ needsInput: false }), log: silentLogger() });
+    const dn = startDesktopNotifier({ db, bus, config: buildConfig({ needsInput: false }), log: silentLogger(), attach: fakeAttach() });
 
     bus.emit({
       type: 'session_event',
@@ -231,7 +251,29 @@ describe('startDesktopNotifier', () => {
     insertSession(db, 'proj', 'sess-1'); // upsertFromHook inserts status 'active'
     const bus = new HubBus();
     const log = silentLogger();
-    const dn = startDesktopNotifier({ db, bus, config: buildConfig(), log });
+    const dn = startDesktopNotifier({ db, bus, config: buildConfig(), log, attach: fakeAttach() });
+
+    bus.emit({
+      type: 'session_event',
+      sessionId: 'sess-1',
+      eventType: 'Notification',
+      payload: { notification_type: 'idle_prompt', message: 'Claude is waiting for your input' },
+      createdAt: Date.now(),
+    });
+
+    expect(notifyMock).not.toHaveBeenCalled();
+    expect(log.debug).toHaveBeenCalledTimes(1);
+    dn.stop();
+  });
+
+  it('suppresses an idle_prompt Notification when the attach wrapper reports the session is working', () => {
+    const db = buildDb();
+    insertSession(db, 'proj', 'sess-1');
+    sessionsRepo.setStatus(db, 'sess-1', 'idle', Date.now()); // hub-side status says idle...
+    const bus = new HubBus();
+    const log = silentLogger();
+    const attach = fakeAttach({ isWorking: true }); // ...but the wrapper says claude is still working (e.g. a subagent)
+    const dn = startDesktopNotifier({ db, bus, config: buildConfig(), log, attach });
 
     bus.emit({
       type: 'session_event',
@@ -251,7 +293,7 @@ describe('startDesktopNotifier', () => {
     insertSession(db, 'proj', 'sess-1');
     sessionsRepo.setStatus(db, 'sess-1', 'idle', Date.now());
     const bus = new HubBus();
-    const dn = startDesktopNotifier({ db, bus, config: buildConfig(), log: silentLogger() });
+    const dn = startDesktopNotifier({ db, bus, config: buildConfig(), log: silentLogger(), attach: fakeAttach() });
 
     bus.emit({
       type: 'session_event',
@@ -273,7 +315,7 @@ describe('startDesktopNotifier', () => {
     sessionsRepo.setStatus(db, 'sess-1', 'idle', Date.now());
     shouldNotifyIdlePromptMock.mockResolvedValue(false);
     const bus = new HubBus();
-    const dn = startDesktopNotifier({ db, bus, config: buildConfig({ aiIdleFilter: true }), log: silentLogger() });
+    const dn = startDesktopNotifier({ db, bus, config: buildConfig({ aiIdleFilter: true }), log: silentLogger(), attach: fakeAttach() });
 
     bus.emit({
       type: 'session_event',
@@ -295,7 +337,7 @@ describe('startDesktopNotifier', () => {
     sessionsRepo.setStatus(db, 'sess-1', 'idle', Date.now());
     shouldNotifyIdlePromptMock.mockResolvedValue(true);
     const bus = new HubBus();
-    const dn = startDesktopNotifier({ db, bus, config: buildConfig({ aiIdleFilter: true }), log: silentLogger() });
+    const dn = startDesktopNotifier({ db, bus, config: buildConfig({ aiIdleFilter: true }), log: silentLogger(), attach: fakeAttach() });
 
     bus.emit({
       type: 'session_event',
@@ -316,7 +358,7 @@ describe('startDesktopNotifier', () => {
     const db = buildDb();
     insertSession(db, 'proj', 'sess-1'); // status 'active'
     const bus = new HubBus();
-    const dn = startDesktopNotifier({ db, bus, config: buildConfig(), log: silentLogger() });
+    const dn = startDesktopNotifier({ db, bus, config: buildConfig(), log: silentLogger(), attach: fakeAttach() });
 
     bus.emit({
       type: 'session_event',
@@ -334,7 +376,7 @@ describe('startDesktopNotifier', () => {
     const db = buildDb();
     insertSession(db, 'proj', 'sess-1');
     const bus = new HubBus();
-    const dn = startDesktopNotifier({ db, bus, config: buildConfig(), log: silentLogger() });
+    const dn = startDesktopNotifier({ db, bus, config: buildConfig(), log: silentLogger(), attach: fakeAttach() });
 
     bus.emit({ type: 'session_event', sessionId: 'sess-1', eventType: 'Stop', payload: null, createdAt: Date.now() });
 
@@ -346,7 +388,7 @@ describe('startDesktopNotifier', () => {
     const db = buildDb();
     insertSession(db, 'proj', 'sess-1');
     const bus = new HubBus();
-    const dn = startDesktopNotifier({ db, bus, config: buildConfig({ turnEnd: true }), log: silentLogger() });
+    const dn = startDesktopNotifier({ db, bus, config: buildConfig({ turnEnd: true }), log: silentLogger(), attach: fakeAttach() });
 
     bus.emit({ type: 'session_event', sessionId: 'sess-1', eventType: 'Stop', payload: null, createdAt: Date.now() });
 
@@ -361,7 +403,7 @@ describe('startDesktopNotifier', () => {
     const db = buildDb();
     insertSession(db, 'proj', 'sess-1');
     const bus = new HubBus();
-    const dn = startDesktopNotifier({ db, bus, config: buildConfig(), log: silentLogger() });
+    const dn = startDesktopNotifier({ db, bus, config: buildConfig(), log: silentLogger(), attach: fakeAttach() });
 
     bus.emit({ type: 'permission_decided', request: fakePermission({ status: 'allowed', decided_by: 'mobile' }) });
 
@@ -372,7 +414,7 @@ describe('startDesktopNotifier', () => {
   it('toasts on chat_delivery when the toggle is on', () => {
     const db = buildDb();
     const bus = new HubBus();
-    const dn = startDesktopNotifier({ db, bus, config: buildConfig(), log: silentLogger() });
+    const dn = startDesktopNotifier({ db, bus, config: buildConfig(), log: silentLogger(), attach: fakeAttach() });
 
     bus.emit({
       type: 'chat_delivery',
@@ -394,7 +436,7 @@ describe('startDesktopNotifier', () => {
   it('does not toast on chat_delivery when notifications.chatDelivery is off', () => {
     const db = buildDb();
     const bus = new HubBus();
-    const dn = startDesktopNotifier({ db, bus, config: buildConfig({ chatDelivery: false }), log: silentLogger() });
+    const dn = startDesktopNotifier({ db, bus, config: buildConfig({ chatDelivery: false }), log: silentLogger(), attach: fakeAttach() });
 
     bus.emit({
       type: 'chat_delivery',
@@ -412,7 +454,7 @@ describe('startDesktopNotifier', () => {
     it('toasts once entering limited, not again while still limited, then once on recovery to ok', () => {
       const db = buildDb();
       const bus = new HubBus();
-      const dn = startDesktopNotifier({ db, bus, config: buildConfig(), log: silentLogger() });
+      const dn = startDesktopNotifier({ db, bus, config: buildConfig(), log: silentLogger(), attach: fakeAttach() });
 
       bus.emit({ type: 'limit_state', state: fakeLimitState('limited') });
       expect(notifyMock).toHaveBeenCalledTimes(1);
@@ -431,7 +473,7 @@ describe('startDesktopNotifier', () => {
     it('does not toast for waiting_reset/continuing/unknown, and still recovers correctly through them', () => {
       const db = buildDb();
       const bus = new HubBus();
-      const dn = startDesktopNotifier({ db, bus, config: buildConfig(), log: silentLogger() });
+      const dn = startDesktopNotifier({ db, bus, config: buildConfig(), log: silentLogger(), attach: fakeAttach() });
 
       bus.emit({ type: 'limit_state', state: fakeLimitState('limited') });
       expect(notifyMock).toHaveBeenCalledTimes(1);
@@ -450,7 +492,7 @@ describe('startDesktopNotifier', () => {
     it('does not toast when starting in ok (no prior limited episode)', () => {
       const db = buildDb();
       const bus = new HubBus();
-      const dn = startDesktopNotifier({ db, bus, config: buildConfig(), log: silentLogger() });
+      const dn = startDesktopNotifier({ db, bus, config: buildConfig(), log: silentLogger(), attach: fakeAttach() });
 
       bus.emit({ type: 'limit_state', state: fakeLimitState('ok') });
 
@@ -461,7 +503,7 @@ describe('startDesktopNotifier', () => {
     it('does not toast when the limit toggle is off', () => {
       const db = buildDb();
       const bus = new HubBus();
-      const dn = startDesktopNotifier({ db, bus, config: buildConfig({ limit: false }), log: silentLogger() });
+      const dn = startDesktopNotifier({ db, bus, config: buildConfig({ limit: false }), log: silentLogger(), attach: fakeAttach() });
 
       bus.emit({ type: 'limit_state', state: fakeLimitState('limited') });
       bus.emit({ type: 'limit_state', state: fakeLimitState('ok') });
@@ -479,7 +521,7 @@ describe('startDesktopNotifier', () => {
     const db = buildDb();
     const bus = new HubBus();
     const log = silentLogger();
-    const dn = startDesktopNotifier({ db, bus, config: buildConfig(), log });
+    const dn = startDesktopNotifier({ db, bus, config: buildConfig(), log, attach: fakeAttach() });
 
     expect(() => bus.emit({ type: 'limit_state', state: fakeLimitState('limited') })).not.toThrow();
     expect(log.debug).toHaveBeenCalledTimes(1);
@@ -490,7 +532,7 @@ describe('startDesktopNotifier', () => {
   it('stop() unsubscribes from the bus', () => {
     const db = buildDb();
     const bus = new HubBus();
-    const dn = startDesktopNotifier({ db, bus, config: buildConfig(), log: silentLogger() });
+    const dn = startDesktopNotifier({ db, bus, config: buildConfig(), log: silentLogger(), attach: fakeAttach() });
 
     dn.stop();
     bus.emit({ type: 'limit_state', state: fakeLimitState('limited') });

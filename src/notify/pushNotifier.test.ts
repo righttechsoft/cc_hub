@@ -6,7 +6,7 @@ import * as instancesRepo from '../db/repo/instances.js';
 import * as sessionsRepo from '../db/repo/sessions.js';
 import * as pushTokensRepo from '../db/repo/pushTokens.js';
 import { startPushNotifier } from './pushNotifier.js';
-import type { HubConfig, LimitStateRow, Logger, PermissionRow } from '../types.js';
+import type { HubConfig, IAttachRegistry, LimitStateRow, Logger, PermissionRow } from '../types.js';
 import type { ApnsSendResult } from './apns.js';
 
 const shouldNotifyIdlePromptMock = vi.fn<(...args: unknown[]) => Promise<boolean>>();
@@ -120,6 +120,24 @@ function fakeAway(away: boolean) {
   return { isAway: () => away };
 }
 
+// Stub IAttachRegistry — see the identical helper in desktopNotifier.test.ts.
+function fakeAttach(opts?: { isWorking?: boolean }): IAttachRegistry {
+  return {
+    register: vi.fn(),
+    unregister: vi.fn(),
+    get: vi.fn(),
+    inject: vi.fn(() => false),
+    touch: vi.fn(),
+    count: vi.fn(() => 0),
+    ingestOutput: vi.fn(),
+    getRingB64: vi.fn(),
+    listAttached: vi.fn(() => []),
+    setWorking: vi.fn(),
+    isWorking: vi.fn(() => opts?.isWorking ?? false),
+    stop: vi.fn(),
+  } as unknown as IAttachRegistry;
+}
+
 function fakeSender(result: ApnsSendResult = 'ok') {
   return { send: vi.fn(async (_token: string, _title: string, _message: string | undefined) => result) };
 }
@@ -140,7 +158,7 @@ describe('startPushNotifier', () => {
     pushTokensRepo.upsert(db, { token: 'bbbb2222', platform: 'ios', now: Date.now() });
     const bus = new HubBus();
     const sender = fakeSender();
-    const pn = startPushNotifier({ db, bus, config: buildConfig(), log: silentLogger(), away: fakeAway(true), sender });
+    const pn = startPushNotifier({ db, bus, config: buildConfig(), log: silentLogger(), away: fakeAway(true), sender, attach: fakeAttach() });
 
     bus.emit({ type: 'permission_request', request: fakePermission() });
     await tick();
@@ -160,7 +178,7 @@ describe('startPushNotifier', () => {
     pushTokensRepo.upsert(db, { token: 'aaaa1111', platform: 'ios', now: Date.now() });
     const bus = new HubBus();
     const sender = fakeSender();
-    const pn = startPushNotifier({ db, bus, config: buildConfig(), log: silentLogger(), away: fakeAway(false), sender });
+    const pn = startPushNotifier({ db, bus, config: buildConfig(), log: silentLogger(), away: fakeAway(false), sender, attach: fakeAttach() });
 
     bus.emit({ type: 'permission_request', request: fakePermission() });
     await tick();
@@ -175,7 +193,7 @@ describe('startPushNotifier', () => {
     pushTokensRepo.upsert(db, { token: 'aaaa1111', platform: 'ios', now: Date.now() });
     const bus = new HubBus();
     const sender = fakeSender('unregistered');
-    const pn = startPushNotifier({ db, bus, config: buildConfig(), log: silentLogger(), away: fakeAway(true), sender });
+    const pn = startPushNotifier({ db, bus, config: buildConfig(), log: silentLogger(), away: fakeAway(true), sender, attach: fakeAttach() });
 
     bus.emit({ type: 'permission_request', request: fakePermission() });
     await tick();
@@ -197,6 +215,7 @@ describe('startPushNotifier', () => {
       log: silentLogger(),
       away: fakeAway(true),
       sender,
+      attach: fakeAttach(),
     });
 
     bus.emit({ type: 'permission_request', request: fakePermission() });
@@ -212,7 +231,30 @@ describe('startPushNotifier', () => {
     pushTokensRepo.upsert(db, { token: 'aaaa1111', platform: 'ios', now: Date.now() });
     const bus = new HubBus();
     const sender = fakeSender();
-    const pn = startPushNotifier({ db, bus, config: buildConfig(), log: silentLogger(), away: fakeAway(true), sender });
+    const pn = startPushNotifier({ db, bus, config: buildConfig(), log: silentLogger(), away: fakeAway(true), sender, attach: fakeAttach() });
+
+    bus.emit({
+      type: 'session_event',
+      sessionId: 'sess-1',
+      eventType: 'Notification',
+      payload: { notification_type: 'idle_prompt', message: 'Claude is waiting for your input' },
+      createdAt: Date.now(),
+    });
+    await tick();
+
+    expect(sender.send).not.toHaveBeenCalled();
+    pn.stop();
+  });
+
+  it('suppresses an idle_prompt Notification when the attach wrapper reports the session is working', async () => {
+    const db = buildDb();
+    insertSession(db, 'proj', 'sess-1');
+    sessionsRepo.setStatus(db, 'sess-1', 'idle', Date.now()); // hub-side status says idle...
+    pushTokensRepo.upsert(db, { token: 'aaaa1111', platform: 'ios', now: Date.now() });
+    const bus = new HubBus();
+    const sender = fakeSender();
+    // ...but the wrapper says claude is still working (e.g. a subagent).
+    const pn = startPushNotifier({ db, bus, config: buildConfig(), log: silentLogger(), away: fakeAway(true), sender, attach: fakeAttach({ isWorking: true }) });
 
     bus.emit({
       type: 'session_event',
@@ -242,6 +284,7 @@ describe('startPushNotifier', () => {
       log: silentLogger(),
       away: fakeAway(true),
       sender,
+      attach: fakeAttach(),
     });
 
     bus.emit({
@@ -273,6 +316,7 @@ describe('startPushNotifier', () => {
       log: silentLogger(),
       away: fakeAway(true),
       sender,
+      attach: fakeAttach(),
     });
 
     bus.emit({
@@ -295,7 +339,7 @@ describe('startPushNotifier', () => {
     pushTokensRepo.upsert(db, { token: 'aaaa1111', platform: 'ios', now: Date.now() });
     const bus = new HubBus();
     const sender = fakeSender();
-    const pn = startPushNotifier({ db, bus, config: buildConfig(), log: silentLogger(), away: fakeAway(true), sender });
+    const pn = startPushNotifier({ db, bus, config: buildConfig(), log: silentLogger(), away: fakeAway(true), sender, attach: fakeAttach() });
 
     bus.emit({ type: 'limit_state', state: fakeLimitState('limited') });
     await tick();
@@ -313,7 +357,7 @@ describe('startPushNotifier', () => {
     pushTokensRepo.upsert(db, { token: 'aaaa1111', platform: 'ios', now: Date.now() });
     const bus = new HubBus();
     const sender = fakeSender();
-    const pn = startPushNotifier({ db, bus, config: buildConfig(), log: silentLogger(), away: fakeAway(true), sender });
+    const pn = startPushNotifier({ db, bus, config: buildConfig(), log: silentLogger(), away: fakeAway(true), sender, attach: fakeAttach() });
 
     bus.emit({ type: 'chat_delivery', instance: 'proj', fromNames: ['other'], count: 2, createdAt: Date.now() });
     await tick();
@@ -339,6 +383,7 @@ describe('startPushNotifier', () => {
       log: silentLogger(),
       away: fakeAway(true),
       sender,
+      attach: fakeAttach(),
     });
 
     bus.emit({ type: 'chat_delivery', instance: 'proj', fromNames: ['other'], count: 1, createdAt: Date.now() });

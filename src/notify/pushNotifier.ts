@@ -1,5 +1,5 @@
 import type Database from 'better-sqlite3';
-import type { HubConfig, HubEvent, Logger } from '../types.js';
+import type { HubConfig, HubEvent, IAttachRegistry, Logger } from '../types.js';
 import type { HubBus } from '../core/bus.js';
 import * as sessionsRepo from '../db/repo/sessions.js';
 import * as pushTokensRepo from '../db/repo/pushTokens.js';
@@ -15,6 +15,8 @@ export interface PushNotifierDeps {
   log: Logger;
   away: Pick<AwayDetector, 'isAway'>;
   sender: Pick<ApnsSender, 'send'>;
+  // orchestrator: pass attach here (src/attach/attachRegistry.ts) — not yet wired in index.ts
+  attach: IAttachRegistry;
 }
 
 export interface PushNotifier {
@@ -34,7 +36,7 @@ function resolveInstanceName(db: Database.Database, sessionId: string): string {
 // Subscribes to HubBus and mirrors desktopNotifier's event selection, but sends APNs pushes
 // instead of toasts, and only while the desktop user is away — see awayDetector.
 export function startPushNotifier(deps: PushNotifierDeps): PushNotifier {
-  const { db, bus, config, log, away, sender } = deps;
+  const { db, bus, config, log, away, sender, attach } = deps;
 
   let limitedEpisodeActive = false;
 
@@ -77,8 +79,13 @@ export function startPushNotifier(deps: PushNotifierDeps): PushNotifier {
           if (!config.notifications.needsInput) return;
           const sess = sessionsRepo.getJoined(db, e.sessionId);
           const payload = isRecord(e.payload) ? e.payload : {};
-          if (payload.notification_type === 'idle_prompt' && sess?.status === 'active') {
-            log.debug('pushNotifier: suppressed idle_prompt push, session mid-turn', { sessionId: e.sessionId });
+          // See the matching comment in desktopNotifier.ts — hub-side status can go stale during
+          // subagent (Task) work, so we also trust the attach wrapper's live "is claude working"
+          // read.
+          if (payload.notification_type === 'idle_prompt' && (sess?.status === 'active' || (sess && attach.isWorking(sess.cwd)))) {
+            log.debug('pushNotifier: suppressed idle_prompt push, session mid-turn or attach reports working', {
+              sessionId: e.sessionId,
+            });
             return;
           }
           const name = sess?.instance_name ?? e.sessionId.slice(0, 8);

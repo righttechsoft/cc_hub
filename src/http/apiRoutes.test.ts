@@ -7,7 +7,7 @@ import { runMigrations } from '../db/migrations.js';
 import { buildApiRoutes } from './apiRoutes.js';
 import { createAthen } from '../kb/athen.js';
 import * as pushTokensRepo from '../db/repo/pushTokens.js';
-import type { HubConfig, IClaudeRunner, IPromptDelivery, Logger, RunResult } from '../types.js';
+import type { AttachedClient, HubConfig, IAttachRegistry, IClaudeRunner, IPromptDelivery, Logger, RunResult } from '../types.js';
 import { HubBus } from '../core/bus.js';
 
 function buildDb(): Database.Database {
@@ -97,6 +97,24 @@ function fakeRunner(opts?: { atCapacity?: boolean }): IClaudeRunner & { startNew
   };
 }
 
+function fakeAttach(opts?: { attachedCwd?: string }): IAttachRegistry & { inject: ReturnType<typeof vi.fn> } {
+  const attachedCwd = opts?.attachedCwd;
+  return {
+    register: vi.fn(),
+    unregister: vi.fn(),
+    get: (cwd: string) => (cwd === attachedCwd ? ({ ws: {}, pid: 1, lastSeen: Date.now() } as unknown as AttachedClient) : undefined),
+    inject: vi.fn().mockReturnValue(true),
+    touch: vi.fn(),
+    count: () => (attachedCwd ? 1 : 0),
+    ingestOutput: vi.fn(),
+    getRingB64: () => undefined,
+    listAttached: () => (attachedCwd ? [attachedCwd] : []),
+    setWorking: vi.fn(),
+    isWorking: () => false,
+    stop: vi.fn(),
+  };
+}
+
 function insertSession(db: Database.Database, id: string, transcriptPath: string | null): void {
   const now = Date.now();
   const info = db
@@ -109,7 +127,7 @@ function insertSession(db: Database.Database, id: string, transcriptPath: string
   ).run(id, Number(info.lastInsertRowid), transcriptPath, now, now);
 }
 
-function buildApp(runner: IClaudeRunner) {
+function buildApp(runner: IClaudeRunner, attach?: IAttachRegistry) {
   const db = buildDb();
   const bus = new HubBus();
   const log = silentLogger();
@@ -124,6 +142,7 @@ function buildApp(runner: IClaudeRunner) {
     runner,
     athen: createAthen({ db, log, embedder: undefined }),
     startedAt: Date.now(),
+    attach: attach ?? fakeAttach(),
   });
   return { app, db, log };
 }
@@ -387,5 +406,90 @@ describe('GET /sessions/:id/transcript', () => {
     expect(secondRes.status).toBe(200);
     const second = (await secondRes.json()) as { entries: { uuid: string }[]; byteOffset: number };
     expect(second.entries.map((e) => e.uuid)).toEqual(['r2']);
+  });
+});
+
+describe('POST /sessions/:id/image', () => {
+  const tinyPngBase64 =
+    'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=';
+
+  it('404s for an unknown session', async () => {
+    const runner = fakeRunner();
+    const { app } = buildApp(runner);
+
+    const res = await app.request('/sessions/does-not-exist/image', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ imageBase64: tinyPngBase64 }),
+    });
+
+    expect(res.status).toBe(404);
+    const body = (await res.json()) as { error: { code: string } };
+    expect(body.error.code).toBe('not_found');
+  });
+
+  it('409s when no wrapper is attached for the session cwd', async () => {
+    const runner = fakeRunner();
+    const attach = fakeAttach(); // no cwd attached
+    const { app, db } = buildApp(runner, attach);
+    insertSession(db, 'sess-not-attached', null);
+
+    const res = await app.request('/sessions/sess-not-attached/image', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ imageBase64: tinyPngBase64 }),
+    });
+
+    expect(res.status).toBe(409);
+    const body = (await res.json()) as { error: { code: string } };
+    expect(body.error.code).toBe('not_attached');
+    expect(attach.inject).not.toHaveBeenCalled();
+  });
+
+  it('200s and injects a bracketed-paste file path when attached', async () => {
+    const runner = fakeRunner();
+    const attach = fakeAttach({ attachedCwd: '/proj' }); // insertSession hardcodes cwd '/proj'
+    const { app, db } = buildApp(runner, attach);
+    insertSession(db, 'sess-attached', null);
+
+    const res = await app.request('/sessions/sess-attached/image', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ imageBase64: tinyPngBase64, ext: 'png' }),
+    });
+
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { attached: boolean; path: string };
+    expect(body.attached).toBe(true);
+    expect(body.path).toMatch(/ccimg_[0-9a-f]+\.png$/);
+
+    expect(attach.inject).toHaveBeenCalledTimes(1);
+    const [injectedCwd, injectedText] = attach.inject.mock.calls[0] as [string, string];
+    expect(injectedCwd).toBe('/proj');
+    // bracketedPaste with submit:false: PASTE_START + path + PASTE_END, no trailing \r
+    expect(injectedText.startsWith('\x1b[200~')).toBe(true);
+    expect(injectedText.includes(body.path)).toBe(true);
+    expect(injectedText.endsWith('\r')).toBe(false);
+  });
+
+  it('413s when the decoded image exceeds the size cap', async () => {
+    const runner = fakeRunner();
+    const attach = fakeAttach({ attachedCwd: '/proj' });
+    const { app, db } = buildApp(runner, attach);
+    insertSession(db, 'sess-too-large', null);
+
+    // ~5.4MB of base64 decodes to just over the 4MB cap.
+    const oversizedBase64 = Buffer.alloc(4 * 1024 * 1024 + 1, 1).toString('base64');
+
+    const res = await app.request('/sessions/sess-too-large/image', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ imageBase64: oversizedBase64 }),
+    });
+
+    expect(res.status).toBe(413);
+    const body = (await res.json()) as { error: { code: string } };
+    expect(body.error.code).toBe('too_large');
+    expect(attach.inject).not.toHaveBeenCalled();
   });
 });

@@ -1,7 +1,7 @@
 import { fileURLToPath } from 'node:url';
 import notifier from 'node-notifier';
 import type Database from 'better-sqlite3';
-import type { HubConfig, HubEvent, Logger } from '../types.js';
+import type { HubConfig, HubEvent, IAttachRegistry, Logger } from '../types.js';
 import type { HubBus } from '../core/bus.js';
 import * as sessionsRepo from '../db/repo/sessions.js';
 import { shouldNotifyIdlePrompt } from './needsInputFilter.js';
@@ -11,6 +11,8 @@ export interface DesktopNotifierDeps {
   bus: HubBus;
   config: HubConfig;
   log: Logger;
+  // orchestrator: pass attach here (src/attach/attachRegistry.ts) — not yet wired in index.ts
+  attach: IAttachRegistry;
 }
 
 export interface DesktopNotifier {
@@ -86,7 +88,7 @@ function toast(log: Logger, title: string, message?: string): void {
 // node-notifier/SnoreToast; macOS/Linux notifiers come along for free from the same package).
 // Fire-and-forget, no click actions/callbacks in v1 — see toast() for the crash-proofing contract.
 export function startDesktopNotifier(deps: DesktopNotifierDeps): DesktopNotifier {
-  const { db, bus, config, log } = deps;
+  const { db, bus, config, log, attach } = deps;
 
   // Tracks whether we're inside a "limited" episode that hasn't yet toasted its recovery. Using
   // an episode flag rather than literally comparing to the previous tick's state is deliberate:
@@ -113,8 +115,14 @@ export function startDesktopNotifier(deps: DesktopNotifierDeps): DesktopNotifier
           // genuine idle wait always follows a Stop hook, which flips status to 'idle' long before
           // the 60s idle notification — so idle_prompt on a still-'active' session is a false
           // alarm. permission_prompt is left alone: mid-turn is exactly when it's real.
-          if (payload.notification_type === 'idle_prompt' && sess?.status === 'active') {
-            log.debug('desktopNotifier: suppressed idle_prompt toast, session mid-turn', { sessionId: e.sessionId });
+          // Hub-side status can also go stale during subagent (Task) work, so we additionally
+          // trust the attach wrapper's live pty read of claude's running indicator (see
+          // src/attach/outputScanner.ts) — if it says this session's cwd is actively working,
+          // that's a false alarm too.
+          if (payload.notification_type === 'idle_prompt' && (sess?.status === 'active' || (sess && attach.isWorking(sess.cwd)))) {
+            log.debug('desktopNotifier: suppressed idle_prompt toast, session mid-turn or attach reports working', {
+              sessionId: e.sessionId,
+            });
             return;
           }
           const name = sess?.instance_name ?? e.sessionId.slice(0, 8);

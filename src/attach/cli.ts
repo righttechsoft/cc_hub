@@ -12,6 +12,7 @@ import { parseEnv } from 'node:util';
 import WebSocket from 'ws'; // Node global WebSocket cannot set/inspect readyState the same way
 import { readClipboardForPaste } from './clipboard.js';
 import { bracketedPaste } from './injection.js';
+import { createOutputScanner } from './outputScanner.js';
 
 // Diagnostic trace for the smart-paste path — appended to %TEMP%/cc-attach-debug.log. Always logs
 // the paste trigger + clipboard outcome (low volume); CC_HUB_PASTE_DEBUG=1 additionally logs every
@@ -261,17 +262,25 @@ async function main(): Promise<void> {
   });
 
   const attach = connectAttach(pty);
+  // Watches the same output for claude's "esc to interrupt" running indicator and reports
+  // debounced working/idle transitions to the hub, so it can suppress false "needs input"
+  // notifications during subagent (Task) work — see src/attach/outputScanner.ts.
+  const scanner = createOutputScanner((on) => attach.sendWorking(on));
   // pty.onData is the local terminal's only output source — write it straight through, then feed
   // the hub's mirror on a LATER tick. Doing the coalescer/WS work inline would add latency between
   // the child's output chunks and the real terminal, making ConPTY's output burstier and racing
   // the echo of freshly-typed input (garbled first keystroke). setImmediate preserves order.
   pty.onData((d) => {
     process.stdout.write(d);
-    setImmediate(() => attach.feedOutput(d));
+    setImmediate(() => {
+      scanner.feed(d);
+      attach.feedOutput(d);
+    });
   });
 
   pty.onExit(({ exitCode }) => {
     restoreTerminal();
+    scanner.stop();
     attach.stop();
     process.exit(exitCode ?? 0);
   });
@@ -299,7 +308,7 @@ async function main(): Promise<void> {
 // mobile prompts / chat messages here instead of spawning a headless turn. Never allowed to
 // crash the wrapper: a hub that's down or unreachable just means no injection, terminal still
 // works normally.
-function connectAttach(pty: PtyProcess): { stop(): void; feedOutput(data: string): void } {
+function connectAttach(pty: PtyProcess): { stop(): void; feedOutput(data: string): void; sendWorking(on: boolean): void } {
   const wsUrl = hubUrl.replace(/^http/, 'ws') + '/attach';
 
   // Coalescing rule (pinned protocol): flush when buffered >= 8192 bytes OR 16ms after the first
@@ -462,6 +471,16 @@ function connectAttach(pty: PtyProcess): { stop(): void; feedOutput(data: string
       }
     },
     feedOutput,
+    // Best-effort — if the socket is down, just skip; the hub falls back to status-based
+    // suppression until the wrapper reconnects and the scanner's next transition resyncs it.
+    sendWorking(on: boolean): void {
+      if (!ws || ws.readyState !== WebSocket.OPEN) return;
+      try {
+        ws.send(JSON.stringify({ t: 'working', on }));
+      } catch {
+        // ignore — next reconnect resyncs
+      }
+    },
   };
 }
 
