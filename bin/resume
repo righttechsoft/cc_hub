@@ -1,0 +1,5 @@
+#!/usr/bin/env sh
+# Alias: `resume` == `cc-attach --resume` (resume the previous claude session under the wrapper).
+# Named `resume` rather than `continue` because `continue` is a reserved keyword in both PowerShell
+# and bash, so it can never be invoked as an external command there.
+exec "$(dirname "$0")/cc-attach" --resume "$@"

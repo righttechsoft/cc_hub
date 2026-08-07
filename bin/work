@@ -1,0 +1,3 @@
+#!/usr/bin/env sh
+# Alias: `work` == `cc-attach` (launch claude under the hub wrapper in the current dir).
+exec "$(dirname "$0")/cc-attach" "$@"

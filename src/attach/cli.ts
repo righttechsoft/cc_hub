@@ -508,7 +508,10 @@ function connectAttach(
         // that raw CR isn't read as Enter (see win32InputMode above), so submission is a
         // separate, mode-aware key write.
         pty.write(bracketedPaste(msg.prompt, { submit: false }));
-        if (submit) pty.write(submitKeys());
+        // Delay the Enter so claude finishes ingesting the bracketed paste before it lands. A
+        // short prompt (mobile) submits fine immediately, but a large/multi-line paste (a chat
+        // delivery) can swallow an instantaneous Enter into the paste, leaving the text unsent.
+        if (submit) setTimeout(() => { try { pty.write(submitKeys()); } catch { /* pty gone */ } }, 80);
       } catch {
         // ignore — pty may already be gone
       }
