@@ -200,8 +200,10 @@ class _SessionDetailScreenState extends State<SessionDetailScreen> {
         _transcriptAvailable = true;
         _transcriptLoading = false;
       });
-      if (initial || result.entries.isNotEmpty) {
-        _maybeAutoScrollTranscript(force: initial || wasNearBottom);
+      if (initial) {
+        _scrollTranscriptToBottomWhenReady();
+      } else if (result.entries.isNotEmpty) {
+        _maybeAutoScrollTranscript(force: wasNearBottom);
       }
     } catch (e) {
       if (!mounted) return;
@@ -226,6 +228,28 @@ class _SessionDetailScreenState extends State<SessionDetailScreen> {
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!_transcriptScrollController.hasClients) return;
       _transcriptScrollController.jumpTo(_transcriptScrollController.position.maxScrollExtent);
+    });
+  }
+
+  // On first open the transcript list isn't mounted yet (the view shows a spinner until _load()
+  // finishes), so a single post-frame jump can fire before the list exists and be skipped. Retry
+  // across frames until the controller is attached with content dimensions, then jump to the
+  // bottom — and once more next frame in case variable-height content grew after first layout.
+  void _scrollTranscriptToBottomWhenReady({int attempts = 0}) {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      final ready = _transcriptScrollController.hasClients &&
+          _transcriptScrollController.position.hasContentDimensions;
+      if (!ready) {
+        if (attempts < 10) _scrollTranscriptToBottomWhenReady(attempts: attempts + 1);
+        return;
+      }
+      _transcriptScrollController.jumpTo(_transcriptScrollController.position.maxScrollExtent);
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted && _transcriptScrollController.hasClients) {
+          _transcriptScrollController.jumpTo(_transcriptScrollController.position.maxScrollExtent);
+        }
+      });
     });
   }
 
