@@ -429,9 +429,9 @@ describe('POST /sessions/:id/image', () => {
     expect(body.error.code).toBe('not_found');
   });
 
-  it('409s when no wrapper is attached for the session cwd', async () => {
+  it('200s and returns a saved file path without requiring an attached wrapper', async () => {
     const runner = fakeRunner();
-    const attach = fakeAttach(); // no cwd attached
+    const attach = fakeAttach(); // no cwd attached — should not matter anymore
     const { app, db } = buildApp(runner, attach);
     insertSession(db, 'sess-not-attached', null);
 
@@ -441,13 +441,13 @@ describe('POST /sessions/:id/image', () => {
       body: JSON.stringify({ imageBase64: tinyPngBase64 }),
     });
 
-    expect(res.status).toBe(409);
-    const body = (await res.json()) as { error: { code: string } };
-    expect(body.error.code).toBe('not_attached');
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { path: string };
+    expect(body.path).toMatch(/ccimg_[0-9a-f]+\.png$/);
     expect(attach.inject).not.toHaveBeenCalled();
   });
 
-  it('200s and injects a bracketed-paste file path when attached', async () => {
+  it('200s with the requested extension and does not inject', async () => {
     const runner = fakeRunner();
     const attach = fakeAttach({ attachedCwd: '/proj' }); // insertSession hardcodes cwd '/proj'
     const { app, db } = buildApp(runner, attach);
@@ -460,17 +460,11 @@ describe('POST /sessions/:id/image', () => {
     });
 
     expect(res.status).toBe(200);
-    const body = (await res.json()) as { attached: boolean; path: string };
-    expect(body.attached).toBe(true);
+    const body = (await res.json()) as { path: string };
     expect(body.path).toMatch(/ccimg_[0-9a-f]+\.png$/);
+    expect(body.path.startsWith(tmpdir())).toBe(true);
 
-    expect(attach.inject).toHaveBeenCalledTimes(1);
-    const [injectedCwd, injectedText] = attach.inject.mock.calls[0] as [string, string];
-    expect(injectedCwd).toBe('/proj');
-    // bracketedPaste with submit:false: PASTE_START + path + PASTE_END, no trailing \r
-    expect(injectedText.startsWith('\x1b[200~')).toBe(true);
-    expect(injectedText.includes(body.path)).toBe(true);
-    expect(injectedText.endsWith('\r')).toBe(false);
+    expect(attach.inject).not.toHaveBeenCalled();
   });
 
   it('413s when the decoded image exceeds the size cap', async () => {

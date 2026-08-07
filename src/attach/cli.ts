@@ -132,6 +132,27 @@ function armSnippetTimeout(): void {
   }, SNIPPET_LEADER_TIMEOUT_MS);
 }
 
+// win32-input-mode tracking: conpty.dll turns this mode on (ESC[?9001h) so claude reads keyboard
+// input as key-event records instead of raw bytes — a lone '\r' is then NOT interpreted as Enter
+// (see the Ctrl+V decoding note above for the same mode's effect on paste). Updated from the pty's
+// own OUTPUT (the DEC private mode escape), so the injected-prompt submit key below always matches
+// whatever mode claude actually turned on, regardless of pty backend.
+let win32InputMode = false;
+function scanWin32InputMode(chunk: string): void {
+  const enable = chunk.lastIndexOf('\x1b[?9001h');
+  const disable = chunk.lastIndexOf('\x1b[?9001l');
+  if (enable === -1 && disable === -1) return;
+  win32InputMode = enable > disable;
+}
+
+// The key sequence that submits an injected prompt, matching whichever input mode claude is
+// currently in. win32-input-mode wants a full key-event record (keydown + keyup) for Enter
+// (Vk=13 VK_RETURN, Sc=28, Uc=13 '\r') — this mirrors what Windows Terminal itself sends for
+// Enter in that mode. Otherwise a raw CR (bracketed-paste submit) is what claude expects.
+function submitKeys(): string {
+  return win32InputMode ? '\x1b[13;28;13;1;0;1_\x1b[13;28;13;0;0;1_' : '\r';
+}
+
 let fileEnv: Record<string, string | undefined> = {};
 try {
   fileEnv = parseEnv(readFileSync(join(cwd, '.env'), 'utf8'));
@@ -342,6 +363,7 @@ async function main(): Promise<void> {
   // the echo of freshly-typed input (garbled first keystroke). setImmediate preserves order.
   pty.onData((d) => {
     process.stdout.write(d);
+    scanWin32InputMode(d);
     setImmediate(() => {
       scanner.feed(d);
       attach.feedOutput(d);
@@ -480,8 +502,13 @@ function connectAttach(
     if (typeof parsed !== 'object' || parsed === null) return;
     const msg = parsed as Record<string, unknown>;
     if (msg.t === 'inject' && typeof msg.prompt === 'string') {
+      const submit = msg.submit !== false;
       try {
-        pty.write(bracketedPaste(msg.prompt));
+        // Paste the body without bracketedPaste's own trailing '\r' — under win32-input-mode
+        // that raw CR isn't read as Enter (see win32InputMode above), so submission is a
+        // separate, mode-aware key write.
+        pty.write(bracketedPaste(msg.prompt, { submit: false }));
+        if (submit) pty.write(submitKeys());
       } catch {
         // ignore — pty may already be gone
       }

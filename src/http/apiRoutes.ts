@@ -27,7 +27,6 @@ import * as limitRepo from '../db/repo/limit.js';
 import * as pushTokensRepo from '../db/repo/pushTokens.js';
 import type { Athen } from '../kb/athen.js';
 import { readTranscript } from './transcriptRead.js';
-import { bracketedPaste } from '../attach/injection.js';
 
 export interface BuildApiRoutesDeps {
   config: HubConfig;
@@ -119,7 +118,7 @@ async function readJsonBody(c: Context): Promise<Record<string, unknown> | undef
 }
 
 export function buildApiRoutes(deps: BuildApiRoutesDeps): Hono {
-  const { config, db, bus, log, delivery, watcher, runner, athen, startedAt, pokeChatDelivery, attach } = deps;
+  const { config, db, bus, log, delivery, watcher, runner, athen, startedAt, pokeChatDelivery } = deps;
   const app = new Hono();
 
   app.get('/health', (c) => {
@@ -269,9 +268,10 @@ export function buildApiRoutes(deps: BuildApiRoutesDeps): Hono {
     return c.json({ id, auto_continue: enabled ? 1 : 0 });
   });
 
-  // Phone-attached images can't reach a session over stdin, so the flow is: decode the upload to
-  // a temp file on the PC, then inject that file path into the live cc-attach terminal — `claude`
-  // reads the image straight off disk, same as if a human pasted a local path.
+  // Saves a phone-picked image to a temp file on the PC and returns its path. Sending it is a
+  // separate step: the caller composes text + this path into one prompt and posts it through the
+  // normal /sessions/:id/prompt endpoint, which already knows how to inject into an attached
+  // wrapper or fall back to a headless --resume.
   app.post('/sessions/:id/image', async (c) => {
     const id = c.req.param('id');
     const body = await readJsonBody(c);
@@ -284,13 +284,6 @@ export function buildApiRoutes(deps: BuildApiRoutesDeps): Hono {
 
     const session = sessionsRepo.getJoined(db, id);
     if (!session) return notFound(c, 'session not found');
-
-    if (!attach.get(session.cwd)) {
-      return c.json(
-        { error: { code: 'not_attached', message: 'Open this session with cc-attach to attach images' } },
-        409
-      );
-    }
 
     let bytes: Buffer;
     try {
@@ -317,8 +310,7 @@ export function buildApiRoutes(deps: BuildApiRoutesDeps): Hono {
       return serverError(c, err);
     }
 
-    attach.inject(session.cwd, bracketedPaste(path, { submit: false }));
-    return c.json({ attached: true, path });
+    return c.json({ path });
   });
 
   app.get('/permissions', (c) => {

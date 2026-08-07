@@ -65,11 +65,11 @@ export class AttachRegistry implements IAttachRegistry {
     return this.clients.get(cwd);
   }
 
-  inject(cwd: string, prompt: string): boolean {
+  inject(cwd: string, prompt: string, submit?: boolean): boolean {
     const client = this.clients.get(cwd);
     if (!client) return false;
     try {
-      client.ws.send(JSON.stringify({ t: 'inject', prompt }));
+      client.ws.send(JSON.stringify({ t: 'inject', prompt, submit: submit ?? true }));
       return true;
     } catch (err) {
       this.log.debug('attachRegistry: inject failed', {

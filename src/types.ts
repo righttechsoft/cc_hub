@@ -293,7 +293,9 @@ export interface IAttachRegistry {
   register(cwd: string, client: AttachedClient): void;
   unregister(cwd: string, ws: WSContext): void;
   get(cwd: string): AttachedClient | undefined;
-  inject(cwd: string, prompt: string): boolean;
+  // submit (default true) controls whether the wrapper follows the pasted prompt with an Enter
+  // keypress — see src/attach/cli.ts's mode-aware submitKeys() (win32-input-mode vs raw CR).
+  inject(cwd: string, prompt: string, submit?: boolean): boolean;
   touch(cwd: string, ws: WSContext): void;
   count(): number;
   // Pty output ring buffer (last 65536 bytes) per attached cwd — see src/attach/attachRegistry.ts.

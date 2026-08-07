@@ -101,7 +101,7 @@ describe('AttachRegistry', () => {
     const result = registry.inject('/proj', 'hello world');
 
     expect(result).toBe(true);
-    expect(ws.send).toHaveBeenCalledWith(JSON.stringify({ t: 'inject', prompt: 'hello world' }));
+    expect(ws.send).toHaveBeenCalledWith(JSON.stringify({ t: 'inject', prompt: 'hello world', submit: true }));
     registry.stop();
   });
 

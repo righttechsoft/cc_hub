@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
 import 'package:image_picker/image_picker.dart';
@@ -262,28 +263,40 @@ class _SessionDetailScreenState extends State<SessionDetailScreen> {
     _scrollController.animateTo(0, duration: const Duration(milliseconds: 300), curve: Curves.easeOut);
   }
 
-  Future<void> _send() async {
-    final prompt = _promptController.text.trim();
-    if (prompt.isEmpty || _sending) return;
+  /// Posts [prompt] via `POST /sessions/:id/prompt` and shows the standard
+  /// delivery snackbar (queued vs spawned) or an error snackbar. Shared by
+  /// the composer's send button and the image-compose sheet below, so both
+  /// paths go through the same endpoint and get the same result.
+  /// Returns true on success (caller decides what to clear).
+  Future<bool> _sendPromptText(String prompt) async {
     setState(() => _sending = true);
     try {
       final result = await context.read<ApiClient>().sendPrompt(widget.sessionId, prompt);
-      if (!mounted) return;
-      _promptController.clear();
+      if (!mounted) return true;
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
           content: Text(result.delivery == 'queued' ? 'Queued — runs at next turn end' : 'Spawned'),
         ),
       );
+      return true;
     } on ApiException catch (e) {
-      if (!mounted) return;
+      if (!mounted) return false;
       showErrorSnack(context, e.message);
+      return false;
     } catch (e) {
-      if (!mounted) return;
+      if (!mounted) return false;
       showErrorSnack(context, '$e');
+      return false;
     } finally {
       if (mounted) setState(() => _sending = false);
     }
+  }
+
+  Future<void> _send() async {
+    final prompt = _promptController.text.trim();
+    if (prompt.isEmpty || _sending) return;
+    final ok = await _sendPromptText(prompt);
+    if (ok) _promptController.clear();
   }
 
   /// Small Gallery/Camera picker, matching the DraggableScrollableSheet style
@@ -314,10 +327,11 @@ class _SessionDetailScreenState extends State<SessionDetailScreen> {
     if (source != null) await _attachImage(source);
   }
 
-  /// Picks + compresses an image and hands it to the hub, which writes it to
-  /// a temp file and injects the path into the session's live cc-attach
-  /// terminal (`POST /sessions/:id/image`). A 409 means the session isn't
-  /// currently open in cc-attach — nothing to inject into.
+  /// Picks + compresses an image, lets the user preview it and add a
+  /// message in a compose sheet, then uploads it (`POST
+  /// /sessions/:id/image`, which just saves the file and returns its path)
+  /// and sends the text + path together as one prompt via the normal
+  /// prompt-send path — works for any session, attached or not.
   Future<void> _attachImage(ImageSource source) async {
     if (_attachingImage) return;
     // Grabbed synchronously (before any await) so this method never reads
@@ -333,28 +347,83 @@ class _SessionDetailScreenState extends State<SessionDetailScreen> {
       );
       if (picked == null) return; // user cancelled
       final bytes = await picked.readAsBytes();
-      final base64Image = base64Encode(bytes);
       final ext = _imageExtFromPath(picked.path);
-      await apiClient.attachImage(widget.sessionId, base64Image, ext);
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Image attached — check the session')),
-      );
+      final text = await _showComposeSheet(bytes);
+      if (text == null) return; // cancelled
+
+      final base64Image = base64Encode(bytes);
+      final path = await apiClient.attachImage(widget.sessionId, base64Image, ext);
+      final trimmedText = text.trim();
+      final prompt = trimmedText.isEmpty ? path : '$trimmedText\n$path';
+      await _sendPromptText(prompt);
     } on ApiException catch (e) {
       if (!mounted) return;
-      if (e.statusCode == 409) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Open this session in cc-attach to attach images')),
-        );
-      } else {
-        showErrorSnack(context, e.message);
-      }
+      showErrorSnack(context, e.message);
     } catch (e) {
       if (!mounted) return;
       showErrorSnack(context, '$e');
     } finally {
       if (mounted) setState(() => _attachingImage = false);
     }
+  }
+
+  /// Bottom sheet previewing the picked image with a text field for an
+  /// optional accompanying message. Returns the entered text (possibly
+  /// empty — image-only is allowed) on Send, or null on Cancel.
+  Future<String?> _showComposeSheet(Uint8List bytes) async {
+    final tokens = context.tokens;
+    final textController = TextEditingController();
+    final sent = await showModalBottomSheet<bool>(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: tokens.surface,
+      builder: (sheetContext) => Padding(
+        padding: EdgeInsets.only(bottom: MediaQuery.of(sheetContext).viewInsets.bottom),
+        child: SafeArea(
+          child: Padding(
+            padding: const EdgeInsets.all(16),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                ClipRRect(
+                  borderRadius: BorderRadius.circular(kRadiusCard),
+                  child: Image.memory(bytes, height: 200, fit: BoxFit.contain),
+                ),
+                const SizedBox(height: 12),
+                TextField(
+                  controller: textController,
+                  maxLines: 4,
+                  minLines: 1,
+                  autofocus: true,
+                  decoration: const InputDecoration(hintText: 'Add a message…'),
+                ),
+                const SizedBox(height: 12),
+                Row(
+                  children: [
+                    Expanded(
+                      child: TextButton(
+                        onPressed: () => Navigator.of(sheetContext).pop(false),
+                        child: const Text('Cancel'),
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: FilledButton(
+                        onPressed: () => Navigator.of(sheetContext).pop(true),
+                        child: const Text('Send'),
+                      ),
+                    ),
+                  ],
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+    return sent == true ? textController.text : null;
   }
 
   Future<void> _toggleAutoContinue(bool value) async {
