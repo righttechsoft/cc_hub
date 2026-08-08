@@ -508,10 +508,27 @@ function connectAttach(
         // that raw CR isn't read as Enter (see win32InputMode above), so submission is a
         // separate, mode-aware key write.
         pty.write(bracketedPaste(msg.prompt, { submit: false }));
-        // Delay the Enter so claude finishes ingesting the bracketed paste before it lands. A
-        // short prompt (mobile) submits fine immediately, but a large/multi-line paste (a chat
-        // delivery) can swallow an instantaneous Enter into the paste, leaving the text unsent.
-        if (submit) setTimeout(() => { try { pty.write(submitKeys()); } catch { /* pty gone */ } }, 80);
+        dlog(
+          `inject: len=${msg.prompt.length} submit=${String(submit)} win32=${String(win32InputMode)}`
+        );
+        if (submit) {
+          // Short single-line prompts (mobile) submit with an IMMEDIATE Enter — this is the
+          // proven-working path; delaying it regressed mobile submit. Only large/multi-line
+          // pastes (chat deliveries) get a delayed Enter, so claude finishes ingesting the
+          // paste before Enter lands instead of swallowing it into the paste.
+          const needsDelay = msg.prompt.length > 1000 || msg.prompt.includes('\n');
+          const fire = (): void => {
+            try {
+              const keys = submitKeys();
+              dlog(`inject: submit fire win32=${String(win32InputMode)} keys=${Buffer.from(keys, 'binary').toString('hex')}`);
+              pty.write(keys);
+            } catch {
+              // ignore — pty may already be gone
+            }
+          };
+          if (needsDelay) setTimeout(fire, 150);
+          else fire();
+        }
       } catch {
         // ignore — pty may already be gone
       }
