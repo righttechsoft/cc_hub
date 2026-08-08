@@ -105,6 +105,10 @@ const fenceCodePastes = hubConfig.fenceCodePastes;
 
 const MIN_OPEN_MS_FOR_RESET = 30_000;
 const MAX_BACKOFF_MS = 60_000;
+// Hub's "displaced by a newer wrapper for this cwd" close code (attachRegistry CLOSE_DISPLACED)
+// and the dormant retry cadence a displaced wrapper drops to (see scheduleReconnect).
+const CLOSE_DISPLACED_CODE = 4001;
+const DISPLACED_RETRY_MS = 300_000;
 
 // Snippets / prompt macros: leader key (Ctrl+G) + one selector character expands to a
 // config-defined canned text (src/attach/snippets.ts has the pure leader/selector state machine).
@@ -417,6 +421,7 @@ function connectAttach(
   let stopped = false;
   let closedHandled = false;
   let warnedThisOutage = false;
+  let displaced = false;
   let heartbeatTimer: ReturnType<typeof setInterval> | null = null;
   let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   let outBuf: Buffer[] = [];
@@ -485,8 +490,12 @@ function connectAttach(
 
   function scheduleReconnect(): void {
     if (stopped) return;
-    const delay = Math.min(1000 * 2 ** attempt, MAX_BACKOFF_MS);
-    attempt++;
+    // Displaced by another cc-attach in the same directory (hub close code 4001): go dormant
+    // with a slow fixed retry instead of the normal ladder — an eager reconnect would displace
+    // the newer wrapper right back, and the two would ping-pong the slot forever. The slow retry
+    // still self-heals if the winner exits later.
+    const delay = displaced ? DISPLACED_RETRY_MS : Math.min(1000 * 2 ** attempt, MAX_BACKOFF_MS);
+    if (!displaced) attempt++;
     reconnectTimer = setTimeout(() => {
       if (!stopped) connect();
     }, delay);
@@ -546,6 +555,7 @@ function connectAttach(
     socket.on('open', () => {
       openedAt = Date.now();
       warnedThisOutage = false;
+      displaced = false;
       try {
         socket.send(JSON.stringify({ t: 'register', cwd, pid: process.pid }));
       } catch {
@@ -559,20 +569,26 @@ function connectAttach(
       handleMessage(data.toString());
     });
 
-    const onDown = (): void => {
+    // NEVER write runtime notices to stderr here: it is the same screen claude's TUI is drawing
+    // on, so any post-startup print corrupts the interactive display (fragments bleed into the
+    // conversation). All connection chatter goes to the debug log file instead.
+    const onDown = (code?: number): void => {
       if (closedHandled) return;
       closedHandled = true;
       clearHeartbeat();
-      if (!warnedThisOutage) {
+      if (code === CLOSE_DISPLACED_CODE) {
+        displaced = true;
+        dlog('attach ws: displaced by another cc-attach in this cwd — dormant, slow retry');
+      } else if (!warnedThisOutage) {
         warnedThisOutage = true;
-        process.stderr.write('cc-attach: hub connection unavailable — remote prompts will not be injected until it reconnects\n');
+        dlog('attach ws: hub connection unavailable — remote prompts not injected until reconnect');
       }
       if (openedAt !== 0 && Date.now() - openedAt >= MIN_OPEN_MS_FOR_RESET) attempt = 0;
       openedAt = 0;
       if (!stopped) scheduleReconnect();
     };
-    socket.on('close', onDown);
-    socket.on('error', onDown);
+    socket.on('close', (code) => onDown(code));
+    socket.on('error', () => onDown());
   }
 
   connect();
