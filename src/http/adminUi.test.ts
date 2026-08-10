@@ -56,7 +56,7 @@ describe('renderKbList', () => {
   });
 
   it('renders an empty-state message for no notes', () => {
-    expect(renderKbList([])).toContain('No notes.');
+    expect(renderKbList([])).toContain('no notes yet');
   });
 
   it('includes an hx-get pointing at the note edit fragment route', () => {
@@ -81,7 +81,7 @@ describe('renderKbSearchResults', () => {
   });
 
   it('renders an empty-state message for no results', () => {
-    expect(renderKbSearchResults([])).toContain('No matches.');
+    expect(renderKbSearchResults([])).toContain('No matches');
   });
 });
 
@@ -105,14 +105,14 @@ describe('renderKbForm', () => {
     const html = renderKbForm({ title: '', tags: '', body: '', isNew: true });
     expect(html).toContain('hx-post="/api/v1/admin/kb"');
     expect(html).not.toContain('hx-delete');
-    expect(html).toContain('>Create<');
+    expect(html).toContain('>Create note<');
   });
 
   it('existing-note form puts to /api/v1/admin/kb/:id and has a delete button', () => {
     const html = renderKbForm({ id: 7, title: 't', tags: '', body: 'b', isNew: false });
     expect(html).toContain('hx-put="/api/v1/admin/kb/7"');
     expect(html).toContain('hx-delete="/api/v1/admin/kb/7"');
-    expect(html).toContain('>Save<');
+    expect(html).toContain('>Save changes<');
   });
 
   it('shows an escaped error message when given one', () => {
