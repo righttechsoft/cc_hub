@@ -140,7 +140,9 @@ function fakeAttach(opts?: { isWorking?: boolean }): IAttachRegistry {
 }
 
 function fakeSender(result: ApnsSendResult = 'ok') {
-  return { send: vi.fn(async (_token: string, _title: string, _message: string | undefined) => result) };
+  return {
+    send: vi.fn(async (_token: string, _title: string, _message: string | undefined, _opts?: unknown) => result),
+  };
 }
 
 async function tick(): Promise<void> {
@@ -173,7 +175,7 @@ describe('startPushNotifier', () => {
     pn.stop();
   });
 
-  it('sends nothing when the user is not away', async () => {
+  it('sends a permission_request push even when the user is NOT away (bypasses the away gate)', async () => {
     const db = buildDb();
     insertSession(db, 'proj', 'sess-1');
     pushTokensRepo.upsert(db, { token: 'aaaa1111', platform: 'ios', now: Date.now() });
@@ -181,7 +183,27 @@ describe('startPushNotifier', () => {
     const sender = fakeSender();
     const pn = startPushNotifier({ db, bus, config: buildConfig(), log: silentLogger(), away: fakeAway(false), sender, attach: fakeAttach() });
 
-    bus.emit({ type: 'permission_request', request: fakePermission() });
+    bus.emit({ type: 'permission_request', request: fakePermission({ id: 42 }) });
+    await tick();
+
+    expect(sender.send).toHaveBeenCalledTimes(1);
+    const [, , , opts] = sender.send.mock.calls[0] as [string, string, string | undefined, unknown];
+    expect(opts).toEqual({
+      category: 'PERMISSION_REQUEST',
+      timeSensitive: true,
+      data: { type: 'permission_request', requestId: 42, sessionId: 'sess-1', instance: 'proj' },
+    });
+    pn.stop();
+  });
+
+  it('still respects the away gate for a non-permission event (chat_delivery)', async () => {
+    const db = buildDb();
+    pushTokensRepo.upsert(db, { token: 'aaaa1111', platform: 'ios', now: Date.now() });
+    const bus = new HubBus();
+    const sender = fakeSender();
+    const pn = startPushNotifier({ db, bus, config: buildConfig(), log: silentLogger(), away: fakeAway(false), sender, attach: fakeAttach() });
+
+    bus.emit({ type: 'chat_delivery', instance: 'proj', fromNames: ['other'], count: 1, createdAt: Date.now() });
     await tick();
 
     expect(sender.send).not.toHaveBeenCalled();

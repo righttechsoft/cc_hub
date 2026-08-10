@@ -8,7 +8,7 @@ import * as pushTokensRepo from '../db/repo/pushTokens.js';
 import { formatToolInput, noticeKindLabel, truncateToast } from './desktopNotifier.js';
 import { shouldNotifyIdlePrompt } from './needsInputFilter.js';
 import type { AwayDetector } from './awayDetector.js';
-import type { ApnsSender } from './apns.js';
+import type { ApnsSendOpts, ApnsSender } from './apns.js';
 
 export interface PushNotifierDeps {
   db: Database.Database;
@@ -47,14 +47,14 @@ export function startPushNotifier(deps: PushNotifierDeps): PushNotifier {
 
   let limitedEpisodeActive = false;
 
-  async function pushAll(title: string, message?: string): Promise<void> {
+  async function pushAll(title: string, message?: string, opts?: ApnsSendOpts): Promise<void> {
     try {
       const tokens = pushTokensRepo.list(db);
       if (tokens.length === 0) return;
 
       const results = await Promise.allSettled(
         tokens.map(async (row) => {
-          const result = await sender.send(row.token, title, message);
+          const result = await sender.send(row.token, title, message, opts);
           if (result === 'unregistered') {
             pushTokensRepo.remove(db, row.token);
             log.info('pushNotifier: removed dead token');
@@ -72,13 +72,24 @@ export function startPushNotifier(deps: PushNotifierDeps): PushNotifier {
   }
 
   function handle(e: HubEvent): void {
-    if (!away.isAway()) return;
+    // permission_request bypasses the away gate below — it's time-critical and actionable from
+    // the phone even while the user is at the desktop (the desktop toast still fires independently).
+    if (e.type !== 'permission_request' && !away.isAway()) return;
 
     switch (e.type) {
       case 'permission_request': {
         if (!config.notifications.permissionRequests) return;
         const name = resolveInstanceName(db, e.request.session_id);
-        void pushAll(`${name} — permission`, formatToolInput(e.request.tool_name, e.request.tool_input));
+        void pushAll(`${name} — permission`, formatToolInput(e.request.tool_name, e.request.tool_input), {
+          category: 'PERMISSION_REQUEST',
+          timeSensitive: true,
+          data: {
+            type: 'permission_request',
+            requestId: e.request.id,
+            sessionId: e.request.session_id,
+            instance: name,
+          },
+        });
         return;
       }
       case 'session_event': {

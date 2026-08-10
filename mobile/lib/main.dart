@@ -5,6 +5,7 @@ import 'package:provider/provider.dart';
 
 import 'api_client.dart';
 import 'connection.dart';
+import 'push_actions.dart';
 import 'push_registration.dart';
 import 'restart_widget.dart';
 import 'screens/home.dart';
@@ -103,6 +104,7 @@ class _HubServicesRootState extends State<_HubServicesRoot> with WidgetsBindingO
   late final ConnectionManager _connection;
   late final ApiClient _api;
   late final HubStore _store;
+  final GlobalKey<NavigatorState> _navigatorKey = GlobalKey<NavigatorState>();
 
   @override
   void initState() {
@@ -115,6 +117,8 @@ class _HubServicesRootState extends State<_HubServicesRoot> with WidgetsBindingO
     _connection.onWsConnected = _refreshPending;
     _connection.connectWs();
     unawaited(registerPushToken(_api));
+    setupPushActionListener(api: _api, store: _store, navigatorKey: _navigatorKey);
+    unawaited(checkPendingPermissionOnResume(api: _api, store: _store, navigatorKey: _navigatorKey));
   }
 
   Future<void> _refreshPending() async {
@@ -133,6 +137,7 @@ class _HubServicesRootState extends State<_HubServicesRoot> with WidgetsBindingO
       _connection.connectWs();
     }
     unawaited(registerPushToken(_api));
+    unawaited(checkPendingPermissionOnResume(api: _api, store: _store, navigatorKey: _navigatorKey));
   }
 
   @override
@@ -153,6 +158,7 @@ class _HubServicesRootState extends State<_HubServicesRoot> with WidgetsBindingO
       ],
       child: MaterialApp(
         title: 'CC Hub',
+        navigatorKey: _navigatorKey,
         theme: buildTheme(dark: false),
         darkTheme: buildTheme(dark: true),
         themeMode: themeMode,

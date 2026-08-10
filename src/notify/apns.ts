@@ -10,8 +10,14 @@ export interface ApnsSenderDeps {
   log: Logger;
 }
 
+export interface ApnsSendOpts {
+  category?: string;
+  timeSensitive?: boolean;
+  data?: Record<string, unknown>;
+}
+
 export interface ApnsSender {
-  send(deviceToken: string, title: string, body: string | undefined): Promise<ApnsSendResult>;
+  send(deviceToken: string, title: string, body: string | undefined, opts?: ApnsSendOpts): Promise<ApnsSendResult>;
   stop(): void;
 }
 
@@ -37,6 +43,16 @@ export function buildApnsJwt(opts: { keyPem: string; keyId: string; teamId: stri
   });
 
   return `${signingInput}.${signature.toString('base64url')}`;
+}
+
+/** Pure: builds the JSON APNs payload. `opts.data` is spread at the payload root (never into
+ * `aps`) — the pinned contract for actionable pushes (e.g. permission_request). */
+export function buildApnsPayload(title: string, body: string | undefined, opts?: ApnsSendOpts): string {
+  const aps: Record<string, unknown> = { alert: body ? { title, body } : { title }, sound: 'default' };
+  if (opts?.category) aps.category = opts.category;
+  if (opts?.timeSensitive) aps['interruption-level'] = 'time-sensitive';
+
+  return JSON.stringify({ ...opts?.data, aps });
 }
 
 export function createApnsSender(deps: ApnsSenderDeps): ApnsSender {
@@ -73,7 +89,12 @@ export function createApnsSender(deps: ApnsSenderDeps): ApnsSender {
     return jwt;
   }
 
-  async function send(deviceToken: string, title: string, body: string | undefined): Promise<ApnsSendResult> {
+  async function send(
+    deviceToken: string,
+    title: string,
+    body: string | undefined,
+    opts?: ApnsSendOpts
+  ): Promise<ApnsSendResult> {
     try {
       const jwt = getJwt();
       if (!jwt) return 'failed';
@@ -83,9 +104,7 @@ export function createApnsSender(deps: ApnsSenderDeps): ApnsSender {
           ? 'https://api.sandbox.push.apple.com'
           : 'https://api.push.apple.com';
 
-      const payload = JSON.stringify({
-        aps: { alert: body ? { title, body } : { title }, sound: 'default' },
-      });
+      const payload = buildApnsPayload(title, body, opts);
 
       return await new Promise<ApnsSendResult>((resolve) => {
         const session = http2.connect(host);
