@@ -147,25 +147,22 @@ export function renderMessagesList(messages: MessageRow[]): string {
 // CDN versions pinned as of writing (all fetched and confirmed live): htmx.org 2.0.10,
 // alpinejs 3.15.12, flyonui 2.4.1 (ships flat as flyonui.css/flyonui.js, no dist/ subpath),
 // Tailwind Play CDN 3.4.17. Bump these in one place if a future FlyonUI/Tailwind major changes
-// class names — nothing else in this file needs to change. Each tag carries a SHA-384 `integrity`
-// hash (computed against the exact pinned URL above) + `crossorigin="anonymous"` so a compromised
-// CDN can't silently swap in different script content.
+// class names — nothing else in this file needs to change. Versions are pinned in the URLs but
+// deliberately carry NO SRI integrity hashes: hand-computed hashes proved wrong for two of the
+// five assets (browser refused to execute htmx + Tailwind, silently killing the whole page), and
+// cdn.tailwindcss.com serves a dynamic script SRI can never be stable against. Pinned versions on
+// jsdelivr are protection enough for a LAN-only internal tool.
 export const ADMIN_HTML = `<!doctype html>
 <html lang="en" data-theme="dark">
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>cc_hub admin</title>
-<script src="https://cdn.tailwindcss.com/3.4.17"
-  integrity="sha384-igm5BeiBt36UU4gqwWS7imYmelpTsZlQ45FZf+XBn9MuJbn4nQr7yx1yFydocC/K" crossorigin="anonymous"></script>
-<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/flyonui@2.4.1/flyonui.css"
-  integrity="sha384-ZC0+/vCCDn/Cnx9wDjR5RgANEw9DQdMaoUb0xu50kHnnfgoNH7kqv6JvBjRM17q1" crossorigin="anonymous" />
-<script src="https://unpkg.com/htmx.org@2.0.10/dist/htmx.min.js" defer
-  integrity="sha384-H5SrcfygHmAuTDZphMHqBJLc3FhssKjG7w/CeCpFReSfwBWDTKpkzPP8c+cLsK+V" crossorigin="anonymous"></script>
-<script src="https://cdn.jsdelivr.net/npm/alpinejs@3.15.12/dist/cdn.min.js" defer
-  integrity="sha384-pb6hrQvo4s23cEUFtj0CZkzGE3jyK3pj26RIupXXxhSrrcUA/Cn0lZgcCrGH0t6L" crossorigin="anonymous"></script>
-<script src="https://cdn.jsdelivr.net/npm/flyonui@2.4.1/flyonui.js" defer
-  integrity="sha384-+tCpURq0igGAGVJ1XcjcPENKbudE28m+vCLirmCeYu62DAwJ1w25lDKDprCLaY06" crossorigin="anonymous"></script>
+<script src="https://cdn.tailwindcss.com/3.4.17"></script>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/flyonui@2.4.1/flyonui.css" />
+<script src="https://cdn.jsdelivr.net/npm/htmx.org@2.0.10/dist/htmx.min.js" defer></script>
+<script src="https://cdn.jsdelivr.net/npm/alpinejs@3.15.12/dist/cdn.min.js" defer></script>
+<script src="https://cdn.jsdelivr.net/npm/flyonui@2.4.1/flyonui.js" defer></script>
 </head>
 <body class="min-h-screen bg-base-300 text-base-content" x-data="{ tab: 'athen' }">
 
@@ -175,7 +172,7 @@ export const ADMIN_HTML = `<!doctype html>
     <input type="password" x-model="token" placeholder="Bearer token" autocomplete="off"
       class="input input-bordered input-sm w-48" />
     <button type="button" class="btn btn-primary btn-sm"
-      @click="localStorage.setItem('ccHubToken', token); document.getElementById('bad-token-alert').classList.add('hidden'); htmx.trigger(document.body, 'kb-changed'); htmx.trigger(document.body, 'msg-changed')">
+      @click="localStorage.setItem('ccHubToken', token.trim()); location.reload()">
       Save token
     </button>
   </div>
