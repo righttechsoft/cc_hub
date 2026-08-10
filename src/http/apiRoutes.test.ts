@@ -272,6 +272,332 @@ describe('POST /sessions', () => {
   });
 });
 
+describe('KB (Athen) CRUD', () => {
+  it('GET /kb lists recent notes newest first', async () => {
+    const runner = fakeRunner();
+    const { app } = buildApp(runner);
+
+    await app.request('/kb', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ title: 'first', body: 'b1' }),
+    });
+    const secondRes = await app.request('/kb', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ title: 'second', body: 'b2' }),
+    });
+    const second = (await secondRes.json()) as { note: { id: number } };
+
+    const res = await app.request('/kb');
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { notes: { id: number; title: string }[] };
+    expect(body.notes[0]).toEqual(expect.objectContaining({ id: second.note.id, title: 'second' }));
+  });
+
+  it('PUT /kb/:id updates and merges fields, reflected in GET /kb/:id', async () => {
+    const runner = fakeRunner();
+    const { app } = buildApp(runner);
+
+    const createRes = await app.request('/kb', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ title: 'orig title', body: 'orig body', tags: 'x' }),
+    });
+    const created = (await createRes.json()) as { note: { id: number } };
+
+    const updateRes = await app.request(`/kb/${created.note.id}`, {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ title: 'new title' }),
+    });
+    expect(updateRes.status).toBe(200);
+    const updated = (await updateRes.json()) as { note: { title: string; body: string; tags: string } };
+    expect(updated.note.title).toBe('new title');
+    expect(updated.note.body).toBe('orig body'); // untouched field preserved
+    expect(updated.note.tags).toBe('x');
+
+    const getRes = await app.request(`/kb/${created.note.id}`);
+    const fetched = (await getRes.json()) as { note: { title: string } };
+    expect(fetched.note.title).toBe('new title');
+  });
+
+  it('PUT /kb/:id 404s for a missing note', async () => {
+    const runner = fakeRunner();
+    const { app } = buildApp(runner);
+
+    const res = await app.request('/kb/999999', {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ title: 'x' }),
+    });
+
+    expect(res.status).toBe(404);
+    const body = (await res.json()) as { error: { code: string } };
+    expect(body.error.code).toBe('not_found');
+  });
+
+  it('PUT /kb/:id 400s when no fields are given', async () => {
+    const runner = fakeRunner();
+    const { app } = buildApp(runner);
+    const createRes = await app.request('/kb', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ title: 't', body: 'b' }),
+    });
+    const created = (await createRes.json()) as { note: { id: number } };
+
+    const res = await app.request(`/kb/${created.note.id}`, {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({}),
+    });
+
+    expect(res.status).toBe(400);
+  });
+
+  it('DELETE /kb/:id deletes an existing note', async () => {
+    const runner = fakeRunner();
+    const { app } = buildApp(runner);
+    const createRes = await app.request('/kb', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ title: 't', body: 'b' }),
+    });
+    const created = (await createRes.json()) as { note: { id: number } };
+
+    const delRes = await app.request(`/kb/${created.note.id}`, { method: 'DELETE' });
+    expect(delRes.status).toBe(200);
+    expect(await delRes.json()).toEqual({ deleted: true });
+
+    const getRes = await app.request(`/kb/${created.note.id}`);
+    expect(getRes.status).toBe(404);
+  });
+
+  it('DELETE /kb/:id 404s for a missing note', async () => {
+    const runner = fakeRunner();
+    const { app } = buildApp(runner);
+
+    const res = await app.request('/kb/999999', { method: 'DELETE' });
+    expect(res.status).toBe(404);
+  });
+});
+
+describe('DELETE /messages/:id', () => {
+  it('deletes an existing message, removed from listAll', async () => {
+    const runner = fakeRunner();
+    const { app } = buildApp(runner);
+
+    const sendRes = await app.request('/messages', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ body: 'hello everyone' }),
+    });
+    const sent = (await sendRes.json()) as { message: { id: number } };
+
+    const delRes = await app.request(`/messages/${sent.message.id}`, { method: 'DELETE' });
+    expect(delRes.status).toBe(200);
+    expect(await delRes.json()).toEqual({ deleted: true });
+
+    const listRes = await app.request('/messages');
+    const list = (await listRes.json()) as { messages: { id: number }[] };
+    expect(list.messages.find((m) => m.id === sent.message.id)).toBeUndefined();
+  });
+
+  it('404s for a missing message', async () => {
+    const runner = fakeRunner();
+    const { app } = buildApp(runner);
+
+    const res = await app.request('/messages/999999', { method: 'DELETE' });
+    expect(res.status).toBe(404);
+    const body = (await res.json()) as { error: { code: string } };
+    expect(body.error.code).toBe('not_found');
+  });
+});
+
+function formBody(fields: Record<string, string>): { headers: Record<string, string>; body: string } {
+  return {
+    headers: { 'content-type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams(fields).toString(),
+  };
+}
+
+describe('Admin fragment routes (htmx)', () => {
+  it('GET /admin/kb-list renders note cards, escaping hostile titles', async () => {
+    const runner = fakeRunner();
+    const { app } = buildApp(runner);
+    await app.request('/kb', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ title: '<script>alert(1)</script>', body: 'b' }),
+    });
+
+    const res = await app.request('/admin/kb-list');
+    expect(res.status).toBe(200);
+    expect(res.headers.get('content-type')).toMatch(/text\/html/);
+    const html = await res.text();
+    expect(html).toContain('&lt;script&gt;alert(1)&lt;/script&gt;');
+    expect(html).not.toContain('<script>alert(1)</script>');
+  });
+
+  it('GET /admin/kb-search falls back to recent notes for an empty query', async () => {
+    const runner = fakeRunner();
+    const { app } = buildApp(runner);
+    await app.request('/kb', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ title: 'a note', body: 'b' }),
+    });
+
+    const res = await app.request('/admin/kb-search?q=');
+    expect(res.status).toBe(200);
+    expect(await res.text()).toContain('a note');
+  });
+
+  it('GET /admin/kb-new renders a blank create form', async () => {
+    const runner = fakeRunner();
+    const { app } = buildApp(runner);
+
+    const res = await app.request('/admin/kb-new');
+    expect(res.status).toBe(200);
+    const html = await res.text();
+    expect(html).toContain('hx-post="/api/v1/admin/kb"');
+  });
+
+  it('GET /admin/kb-edit/:id renders the note, 404s when missing', async () => {
+    const runner = fakeRunner();
+    const { app } = buildApp(runner);
+    const createRes = await app.request('/kb', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ title: 'edit me', body: 'body here' }),
+    });
+    const created = (await createRes.json()) as { note: { id: number } };
+
+    const okRes = await app.request(`/admin/kb-edit/${created.note.id}`);
+    expect(okRes.status).toBe(200);
+    expect(await okRes.text()).toContain('edit me');
+
+    const missingRes = await app.request('/admin/kb-edit/999999');
+    expect(missingRes.status).toBe(404);
+    expect(await missingRes.text()).toContain('Note not found');
+  });
+
+  it('POST /admin/kb creates a note from form data and triggers a list refresh', async () => {
+    const runner = fakeRunner();
+    const { app, db } = buildApp(runner);
+
+    const res = await app.request('/admin/kb', {
+      method: 'POST',
+      ...formBody({ title: 'from form', tags: 't', body: 'body text' }),
+    });
+
+    expect(res.status).toBe(200);
+    expect(res.headers.get('HX-Trigger')).toBe('kb-changed');
+    const html = await res.text();
+    expect(html).toContain('from form');
+    const count = db.prepare('SELECT COUNT(*) AS n FROM kb_notes').get() as { n: number };
+    expect(count.n).toBe(1);
+  });
+
+  it('POST /admin/kb 400s and redisplays entered values when title/body are missing', async () => {
+    const runner = fakeRunner();
+    const { app } = buildApp(runner);
+
+    const res = await app.request('/admin/kb', {
+      method: 'POST',
+      ...formBody({ title: '', tags: '', body: '' }),
+    });
+
+    expect(res.status).toBe(400);
+    expect(await res.text()).toContain('required');
+  });
+
+  it('PUT /admin/kb/:id updates the note and triggers a list refresh; 404s when missing', async () => {
+    const runner = fakeRunner();
+    const { app } = buildApp(runner);
+    const createRes = await app.request('/kb', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ title: 'orig', body: 'orig body', tags: '' }),
+    });
+    const created = (await createRes.json()) as { note: { id: number } };
+
+    const res = await app.request(`/admin/kb/${created.note.id}`, {
+      method: 'PUT',
+      ...formBody({ title: 'updated title', tags: '', body: 'orig body' }),
+    });
+    expect(res.status).toBe(200);
+    expect(res.headers.get('HX-Trigger')).toBe('kb-changed');
+    expect(await res.text()).toContain('updated title');
+
+    const missingRes = await app.request('/admin/kb/999999', {
+      method: 'PUT',
+      ...formBody({ title: 'x', tags: '', body: 'y' }),
+    });
+    expect(missingRes.status).toBe(404);
+  });
+
+  it('DELETE /admin/kb/:id deletes the note (list renders fewer notes after); 404s when missing', async () => {
+    const runner = fakeRunner();
+    const { app } = buildApp(runner);
+    const createRes = await app.request('/kb', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ title: 'to delete', body: 'b' }),
+    });
+    const created = (await createRes.json()) as { note: { id: number } };
+
+    const delRes = await app.request(`/admin/kb/${created.note.id}`, { method: 'DELETE' });
+    expect(delRes.status).toBe(200);
+    expect(delRes.headers.get('HX-Trigger')).toBe('kb-changed');
+
+    const listRes = await app.request('/admin/kb-list');
+    expect(await listRes.text()).not.toContain('to delete');
+
+    const missingRes = await app.request('/admin/kb/999999', { method: 'DELETE' });
+    expect(missingRes.status).toBe(404);
+  });
+
+  it('GET /admin/messages-list renders messages, escaping a hostile body', async () => {
+    const runner = fakeRunner();
+    const { app } = buildApp(runner);
+    await app.request('/messages', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ body: '<script>alert(1)</script>' }),
+    });
+
+    const res = await app.request('/admin/messages-list');
+    expect(res.status).toBe(200);
+    const html = await res.text();
+    expect(html).toContain('&lt;script&gt;alert(1)&lt;/script&gt;');
+    expect(html).not.toContain('<script>alert(1)</script>');
+  });
+
+  it('DELETE /admin/messages/:id removes the message; 404s when missing', async () => {
+    const runner = fakeRunner();
+    const { app } = buildApp(runner);
+    const sendRes = await app.request('/messages', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ body: 'delete me via fragment route' }),
+    });
+    const sent = (await sendRes.json()) as { message: { id: number } };
+
+    const delRes = await app.request(`/admin/messages/${sent.message.id}`, { method: 'DELETE' });
+    expect(delRes.status).toBe(200);
+    expect(await delRes.text()).toBe('');
+
+    const listRes = await app.request('/messages');
+    const list = (await listRes.json()) as { messages: { id: number }[] };
+    expect(list.messages.find((m) => m.id === sent.message.id)).toBeUndefined();
+
+    const missingRes = await app.request(`/admin/messages/${sent.message.id}`, { method: 'DELETE' });
+    expect(missingRes.status).toBe(404);
+  });
+});
+
 describe('POST /push/register', () => {
   it('200s and stores a valid hex device token', async () => {
     const runner = fakeRunner();

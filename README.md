@@ -187,12 +187,22 @@ Base URL: `http://<lan-ip>:<port>/api/v1`. Every request needs `Authorization: B
 | `POST /permissions/:id/decision` | `{behavior:"allow"\|"deny", message?}` | 409 if already decided (someone else / timeout got there first) |
 | `GET /messages?limit&beforeId` | — | Chat history, newest first |
 | `POST /messages` | `{to?, body, urgent?}` | `from_name` is always forced to `"mobile"`; omit `to` to broadcast |
+| `DELETE /messages/:id` | — | Deletes a message (and its read receipts); 404 if missing. Deleting an unread broadcast stops it being delivered to instances that haven't read it yet |
+| `GET /kb?limit=` | — | Recent Athen notes, newest first (default 50, max 200) |
 | `GET /kb/search?q=&limit=` | — | Search Athen (hybrid semantic + full-text, same as `athen_search`) |
 | `GET /kb/:id` | — | Full note body |
 | `POST /kb` | `{title, body, tags?}` | Author is forced to `"mobile"` |
+| `PUT /kb/:id` | `{title?, body?, tags?}` | Updates the given fields (at least one required), re-embeds for semantic search; 404 if missing |
+| `DELETE /kb/:id` | — | Deletes a note (and its vector, if any); 404 if missing |
 | `GET /limit` | — | Current `limit_state` row + last 20 `limit_events` |
 | `POST /push/register` | `{token}` | Registers an APNs device token (hex, lowercased); called by the mobile app on launch |
 | `POST /debug/limit` | `{state, resetsAtMs?}` | Dev-only (gated on `logLevel:"debug"`); forces the watcher's state for testing |
+
+### Admin page
+
+Browse to `http://<hub-ip>:4270/admin` for a small built-in web UI to view, edit, and delete Athen notes and chat/broadcast messages — handy for cleaning up a bad note or a stray broadcast without the mobile app. Paste your `authToken` (from `config.json`) into the token field once; it's saved in the browser's `localStorage` and sent as a bearer token on every call. The page itself is a single static HTML file with no login of its own — same LAN-only trust model as the mobile app — and isn't reachable through the Cloudflare relay (only `/api/v1/*` and `/ws` are forwarded).
+
+Built with [htmx](https://htmx.org/) + [Alpine.js](https://alpinejs.dev/) + [FlyonUI](https://flyonui.com/) loaded from CDN (pinned versions, SRI-hashed) — no build step, no bundling, same "no build step" posture as the rest of cc_hub. htmx drives the data (list/search/edit/delete against small HTML-fragment routes under `/api/v1/admin/*`, so it's bearer-authed and relay-forwardable even though the page itself isn't); Alpine handles pure client state (active tab, the token field); FlyonUI/Tailwind supply the dark-theme styling. The fragment routes are thin wrappers over the same repo/Athen calls the JSON `/kb` and `/messages` routes above use.
 
 ### WebSocket
 

@@ -105,6 +105,79 @@ describe('createAthen: save', () => {
   });
 });
 
+describe('createAthen: update', () => {
+  it('re-embeds and refreshes kb_vec', async () => {
+    const db = buildDb();
+    const athen = createAthen({ db, log: silentLogger(), embedder: bucketEmbedder() });
+    const note = await athen.save({ title: 'Docker compose intro', body: 'containers', tags: '', author: 'a' });
+
+    const updated = await athen.update(note.id, { title: 'Build iOS apps', body: 'xcodebuild signing' });
+
+    expect(updated?.title).toBe('Build iOS apps');
+    // The note's vector should now live in the iOS bucket, not the docker bucket.
+    const results = await athen.search('ship an iphone thing', 5);
+    expect(results.map((r) => r.id)).toContain(note.id);
+    athen.stop();
+  });
+
+  it('returns undefined for a missing id', async () => {
+    const db = buildDb();
+    const athen = createAthen({ db, log: silentLogger(), embedder: bucketEmbedder() });
+    expect(await athen.update(999, { title: 'x' })).toBeUndefined();
+    athen.stop();
+  });
+
+  it('is fail-soft when the embedder throws: note updated, warn logged', async () => {
+    const db = buildDb();
+    const log = silentLogger();
+    const athen = createAthen({ db, log, embedder: bucketEmbedder() });
+    const note = await athen.save({ title: 'orig', body: 'body', tags: '', author: 'a' });
+
+    const broken = createAthen({ db, log, embedder: throwingEmbedder() });
+    const updated = await broken.update(note.id, { title: 'still updates' });
+
+    expect(updated?.title).toBe('still updates');
+    expect(kb.get(db, note.id)?.title).toBe('still updates');
+    expect(log.warn).toHaveBeenCalledWith(
+      'athen: embed failed, note updated without vector refresh',
+      expect.anything()
+    );
+    athen.stop();
+    broken.stop();
+  });
+});
+
+describe('createAthen: remove', () => {
+  it('deletes the note and its kb_vec row, returns true', async () => {
+    const db = buildDb();
+    const athen = createAthen({ db, log: silentLogger(), embedder: bucketEmbedder() });
+    const note = await athen.save({ title: 'Build iOS apps', body: 'xcodebuild', tags: '', author: 'a' });
+
+    expect(await athen.remove(note.id)).toBe(true);
+    expect(kb.get(db, note.id)).toBeUndefined();
+    const row = db.prepare('SELECT COUNT(*) AS n FROM kb_vec WHERE note_id = ?').get(note.id) as { n: number };
+    expect(row.n).toBe(0);
+    athen.stop();
+  });
+
+  it('returns false for a missing id', async () => {
+    const db = buildDb();
+    const athen = createAthen({ db, log: silentLogger(), embedder: bucketEmbedder() });
+    expect(await athen.remove(999)).toBe(false);
+    athen.stop();
+  });
+
+  it('is fail-soft with no embedder (no kb_vec table to touch)', async () => {
+    const db = buildDb();
+    const athen = createAthen({ db, log: silentLogger(), embedder: undefined });
+    const note = await athen.save({ title: 'note', body: 'body', tags: '', author: 'a' });
+
+    expect(await athen.remove(note.id)).toBe(true);
+    expect(kb.get(db, note.id)).toBeUndefined();
+    athen.stop();
+  });
+});
+
 describe('createAthen: search', () => {
   it('finds a note by meaning when FTS has zero keyword overlap', async () => {
     const db = buildDb();

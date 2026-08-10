@@ -27,6 +27,14 @@ import * as limitRepo from '../db/repo/limit.js';
 import * as pushTokensRepo from '../db/repo/pushTokens.js';
 import type { Athen } from '../kb/athen.js';
 import { readTranscript } from './transcriptRead.js';
+import {
+  renderErrorFragment,
+  renderKbEditorEmpty,
+  renderKbForm,
+  renderKbList,
+  renderKbSearchResults,
+  renderMessagesList,
+} from './adminUi.js';
 
 export interface BuildApiRoutesDeps {
   config: HubConfig;
@@ -115,6 +123,13 @@ async function readJsonBody(c: Context): Promise<Record<string, unknown> | undef
   } catch {
     return undefined;
   }
+}
+
+// htmx form submissions arrive as application/x-www-form-urlencoded (or multipart), not JSON —
+// Hono's parseBody() gives back string | File per field; the admin fragment routes only ever want
+// the string, so non-string (a stray File) just reads as empty rather than throwing.
+function formStr(v: unknown): string {
+  return typeof v === 'string' ? v : '';
 }
 
 export function buildApiRoutes(deps: BuildApiRoutesDeps): Hono {
@@ -361,6 +376,24 @@ export function buildApiRoutes(deps: BuildApiRoutesDeps): Hono {
     return c.json({ message }, 201);
   });
 
+  // Deleting a message stops it being re-delivered: an unread broadcast would otherwise keep
+  // reaching instances that haven't read it yet (chatDelivery / UserPromptSubmit injection /
+  // urgent Stop block all key off unread rows).
+  app.delete('/messages/:id', (c) => {
+    const id = Number(c.req.param('id'));
+    if (!Number.isInteger(id)) return badRequest(c, 'invalid message id');
+
+    const deleted = messagesRepo.remove(db, id);
+    if (!deleted) return notFound(c, 'message not found');
+    return c.json({ deleted: true });
+  });
+
+  app.get('/kb', (c) => {
+    const limit = clamp(parseIntWithDefault(c.req.query('limit'), 50), 1, 200);
+    const notes = kbRepo.listRecent(db, limit);
+    return c.json({ notes });
+  });
+
   app.get('/kb/search', async (c) => {
     const q = c.req.query('q') ?? '';
     const limit = clamp(parseIntWithDefault(c.req.query('limit'), 5), 1, 50);
@@ -385,6 +418,159 @@ export function buildApiRoutes(deps: BuildApiRoutesDeps): Hono {
 
     const note = await athen.save({ title, body: kbBody, tags, author: 'mobile' });
     return c.json({ note }, 201);
+  });
+
+  app.put('/kb/:id', async (c) => {
+    const id = Number(c.req.param('id'));
+    if (!Number.isInteger(id)) return badRequest(c, 'invalid kb id');
+
+    const body = await readJsonBody(c);
+    const title = body && typeof body.title === 'string' ? body.title : undefined;
+    const kbBody = body && typeof body.body === 'string' ? body.body : undefined;
+    const tags = body && typeof body.tags === 'string' ? body.tags : undefined;
+    if (title === undefined && kbBody === undefined && tags === undefined) {
+      return badRequest(c, 'at least one of title, body, tags is required');
+    }
+
+    const note = await athen.update(id, { title, body: kbBody, tags });
+    if (!note) return notFound(c, 'kb note not found');
+    return c.json({ note });
+  });
+
+  app.delete('/kb/:id', async (c) => {
+    const id = Number(c.req.param('id'));
+    if (!Number.isInteger(id)) return badRequest(c, 'invalid kb id');
+
+    const deleted = await athen.remove(id);
+    if (!deleted) return notFound(c, 'kb note not found');
+    return c.json({ deleted: true });
+  });
+
+  // --- Admin fragment routes (htmx) ---
+  // Thin wrappers over the same kb/messages repo + Athen calls as the JSON routes above, but
+  // returning HTML fragments for the htmx-driven /admin page (see adminUi.ts) instead of JSON.
+  // Mounted under /api/v1 like everything else in this file, so they're bearer-authed by app.ts
+  // and relay-forwardable — the /admin page itself is neither, but these calls it makes are.
+  app.get('/admin/kb-list', (c) => {
+    const limit = clamp(parseIntWithDefault(c.req.query('limit'), 100), 1, 200);
+    return c.html(renderKbList(kbRepo.listRecent(db, limit)));
+  });
+
+  app.get('/admin/kb-search', async (c) => {
+    const q = (c.req.query('q') ?? '').trim();
+    if (q.length === 0) return c.html(renderKbList(kbRepo.listRecent(db, 100)));
+
+    const limit = clamp(parseIntWithDefault(c.req.query('limit'), 50), 1, 200);
+    const results = await athen.search(q, limit);
+    return c.html(renderKbSearchResults(results));
+  });
+
+  app.get('/admin/kb-new', (c) => {
+    return c.html(renderKbForm({ title: '', tags: '', body: '', isNew: true }));
+  });
+
+  app.get('/admin/kb-edit/:id', (c) => {
+    const id = Number(c.req.param('id'));
+    if (!Number.isInteger(id)) return c.html(renderErrorFragment('Invalid note id.'), 400);
+
+    const note = kbRepo.get(db, id);
+    if (!note) return c.html(renderErrorFragment('Note not found.'), 404);
+
+    return c.html(
+      renderKbForm({
+        id: note.id,
+        title: note.title,
+        tags: note.tags,
+        body: note.body,
+        authorName: note.author_name,
+        updatedAt: note.updated_at,
+        isNew: false,
+      })
+    );
+  });
+
+  app.post('/admin/kb', async (c) => {
+    const form = await c.req.parseBody();
+    const title = formStr(form.title).trim();
+    const tags = formStr(form.tags);
+    const body = formStr(form.body);
+    if (!title || !body) {
+      return c.html(renderKbForm({ title, tags, body, isNew: true, error: 'Title and body are required.' }), 400);
+    }
+
+    const note = await athen.save({ title, body, tags, author: 'admin' });
+    c.header('HX-Trigger', 'kb-changed');
+    return c.html(
+      renderKbForm({
+        id: note.id,
+        title: note.title,
+        tags: note.tags,
+        body: note.body,
+        authorName: note.author_name,
+        updatedAt: note.updated_at,
+        isNew: false,
+      })
+    );
+  });
+
+  app.put('/admin/kb/:id', async (c) => {
+    const id = Number(c.req.param('id'));
+    if (!Number.isInteger(id)) return c.html(renderErrorFragment('Invalid note id.'), 400);
+
+    const form = await c.req.parseBody();
+    const title = formStr(form.title).trim();
+    const tags = formStr(form.tags);
+    const body = formStr(form.body);
+    if (!title || !body) {
+      return c.html(
+        renderKbForm({ id, title, tags, body, isNew: false, error: 'Title and body are required.' }),
+        400
+      );
+    }
+
+    const note = await athen.update(id, { title, body, tags });
+    if (!note) return c.html(renderErrorFragment('Note not found (it may already have been deleted).'), 404);
+
+    c.header('HX-Trigger', 'kb-changed');
+    return c.html(
+      renderKbForm({
+        id: note.id,
+        title: note.title,
+        tags: note.tags,
+        body: note.body,
+        authorName: note.author_name,
+        updatedAt: note.updated_at,
+        isNew: false,
+      })
+    );
+  });
+
+  app.delete('/admin/kb/:id', async (c) => {
+    const id = Number(c.req.param('id'));
+    if (!Number.isInteger(id)) return c.html(renderErrorFragment('Invalid note id.'), 400);
+
+    const deleted = await athen.remove(id);
+    if (!deleted) return c.html(renderErrorFragment('Note not found (already deleted?).'), 404);
+
+    c.header('HX-Trigger', 'kb-changed');
+    return c.html(renderKbEditorEmpty());
+  });
+
+  app.get('/admin/messages-list', (c) => {
+    const limit = clamp(parseIntWithDefault(c.req.query('limit'), 50), 1, 200);
+    return c.html(renderMessagesList(messagesRepo.listAll(db, limit)));
+  });
+
+  app.delete('/admin/messages/:id', (c) => {
+    const id = Number(c.req.param('id'));
+    if (!Number.isInteger(id)) return c.html(renderErrorFragment('Invalid message id.'), 400);
+
+    const deleted = messagesRepo.remove(db, id);
+    if (!deleted) return c.html(renderErrorFragment('Message not found (already deleted?).'), 404);
+    // Deleting a message stops it being re-delivered to instances that haven't read it yet (same
+    // reasoning as the JSON DELETE /messages/:id route above). The delete button's own hx-target
+    // is the message's own card (outerHTML swap), so an empty body here just removes it in place.
+    return c.html('');
   });
 
   app.get('/limit', (c) => {

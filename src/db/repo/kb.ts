@@ -41,6 +41,41 @@ export function get(db: Database.Database, id: number): KbNoteRow | undefined {
   return stmt(db, 'SELECT * FROM kb_notes WHERE id = ?').get(id) as KbNoteRow | undefined;
 }
 
+export function listRecent(db: Database.Database, limit = 50): KbNoteRow[] {
+  return stmt(db, 'SELECT * FROM kb_notes ORDER BY id DESC LIMIT ?').all(limit) as KbNoteRow[];
+}
+
+// Fields omitted from opts keep their existing value. kb_fts stays in sync via the same
+// kb_notes_au trigger add() relies on (see migrations.ts) — no manual FTS write needed here.
+export function update(
+  db: Database.Database,
+  id: number,
+  opts: { title?: string; body?: string; tags?: string; now: number }
+): KbNoteRow | undefined {
+  const existing = get(db, id);
+  if (!existing) return undefined;
+
+  const title = opts.title ?? existing.title;
+  const body = opts.body ?? existing.body;
+  const tags = opts.tags ?? existing.tags;
+  stmt(db, 'UPDATE kb_notes SET title = ?, body = ?, tags = ?, updated_at = ? WHERE id = ?').run(
+    title,
+    body,
+    tags,
+    opts.now,
+    id
+  );
+
+  return { ...existing, title, body, tags, updated_at: opts.now };
+}
+
+// kb_fts cleanup happens via the kb_notes_ad trigger, same as add()'s kb_notes_ai trigger.
+// kb_vec is NOT touched here — athen owns it (the extension may not be loaded on this connection).
+export function remove(db: Database.Database, id: number): boolean {
+  const result = stmt(db, 'DELETE FROM kb_notes WHERE id = ?').run(id);
+  return result.changes > 0;
+}
+
 // FTS5 MATCH treats bare terms as query syntax (AND/OR/NOT/NEAR, prefix *, column filters);
 // quoting each whitespace-split term makes arbitrary user input safe to match literally.
 // Terms are OR-joined for recall (a multi-word query matching any one word still hits) —
@@ -97,6 +132,12 @@ export function upsertVec(db: Database.Database, noteId: number, vec: Float32Arr
     );
   });
   run();
+}
+
+export function deleteVec(db: Database.Database, noteId: number): void {
+  // Number bind is fine here (unlike upsertVec's INSERT): only vec0's xUpdate PK insert path
+  // rejects non-BigInt numbers.
+  stmt(db, 'DELETE FROM kb_vec WHERE note_id = ?').run(noteId);
 }
 
 export function knnVec(

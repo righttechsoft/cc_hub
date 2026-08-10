@@ -26,6 +26,8 @@ export interface AthenDeps {
 
 export interface Athen {
   save(opts: { title: string; body: string; tags: string; author: string }): Promise<KbNoteRow>;
+  update(id: number, opts: { title?: string; body?: string; tags?: string }): Promise<KbNoteRow | undefined>;
+  remove(id: number): Promise<boolean>;
   search(query: string, limit?: number): Promise<KbSearchResult[]>;
   stop(): void;
 }
@@ -168,6 +170,43 @@ export function createAthen(deps: AthenDeps): Athen {
         }
       }
       return note;
+    },
+
+    async update(id, opts) {
+      const note = kb.update(db, id, { ...opts, now: Date.now() });
+      if (!note) return undefined;
+      if (embedder && vecReady) {
+        try {
+          const vec = await embedder.embed(embedText(note));
+          ensureTable(vec.length);
+          kb.upsertVec(db, note.id, vec);
+        } catch (err) {
+          // Fail-soft, same as save(): the note is updated and FTS-findable; backfill retries
+          // the vector later (its stale copy just lags the new title/body/tags until then).
+          log.warn('athen: embed failed, note updated without vector refresh', {
+            noteId: note.id,
+            error: err instanceof Error ? err.message : String(err),
+          });
+        }
+      }
+      return note;
+    },
+
+    async remove(id) {
+      const deleted = kb.remove(db, id);
+      // Only touch kb_vec when this connection actually has the extension loaded (vecReady) and
+      // the table exists — mirrors the guard search() uses before querying it.
+      if (deleted && vecReady && vecTableExists(db)) {
+        try {
+          kb.deleteVec(db, id);
+        } catch (err) {
+          log.warn('athen: kb_vec delete failed', {
+            noteId: id,
+            error: err instanceof Error ? err.message : String(err),
+          });
+        }
+      }
+      return deleted;
     },
 
     async search(query, limit = 5) {

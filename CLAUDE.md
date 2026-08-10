@@ -95,7 +95,7 @@ The headless paths above (chat fresh-spawn, mobile `--resume`) never repaint a h
 
 ## Function 2 — mobile API (`src/http/apiRoutes.ts`, `src/http/wsHub.ts`)
 
-REST under `/api/v1`: health, sessions (+events, +prompt, +auto-continue), permissions (+decision), messages, kb, limit, debug/limit (debug logLevel only). No long-poll/SSE — realtime is `/ws` only. Prompt bodies capped 8000 chars.
+REST under `/api/v1`: health, sessions (+events, +prompt, +auto-continue), permissions (+decision), messages (+delete), kb (list/search/get/create/update/delete), limit, debug/limit (debug logLevel only). No long-poll/SSE — realtime is `/ws` only. Prompt bodies capped 8000 chars. An admin page (`src/http/adminUi.ts`, served at `GET /admin`) lets a browser view/edit/delete Athen notes and chat messages — built with htmx + Alpine.js + FlyonUI/Tailwind from CDN (pinned, SRI-hashed; LAN-only tool, no CSP to violate), no build step. htmx talks to small HTML-fragment routes under `/api/v1/admin/*` in `apiRoutes.ts` (thin wrappers over the same repo/Athen calls the JSON routes use) — those ARE bearer-authed/relay-forwardable like the rest of `/api/v1`, unlike `/admin` itself, which is mounted without `bearerAuth`/`localhostGate` (same LAN-only trust level as the mobile app; unreachable via relay since only `/api/v1/*` and `/ws` are forwarded).
 
 **Remote prompt routing** (`src/runner/promptDelivery.ts`):
 - Session `active` (or runner busy on it) → enqueue `pending_prompts(status='queued')`; drained by the next Stop hook via `claimForStopBlock` → block-with-reason ("execute it now").

@@ -122,6 +122,19 @@ export function listAll(db: Database.Database, limit = 50, beforeId?: number): M
   return stmt(db, 'SELECT * FROM messages ORDER BY id DESC LIMIT ?').all(limit) as MessageRow[];
 }
 
+// Deletes message_reads first (FK-references messages.id, foreign_keys is ON) then the message
+// itself. Used by the admin UI to remove a stale/unwanted message — for an unread broadcast this
+// also stops it being re-delivered to instances that haven't read it yet.
+export function remove(db: Database.Database, id: number): boolean {
+  const deleteReads = stmt(db, 'DELETE FROM message_reads WHERE message_id = ?');
+  const deleteMessage = stmt(db, 'DELETE FROM messages WHERE id = ?');
+  const run = db.transaction(() => {
+    deleteReads.run(id);
+    return deleteMessage.run(id);
+  });
+  return run().changes > 0;
+}
+
 // Retention: a direct message (to_name set) is purgeable once its single recipient has read it.
 // A broadcast message (to_name NULL, delivered to every instance's inbox) is only purgeable once
 // every currently-known instance (excluding the sender) has a read receipt for it — otherwise a

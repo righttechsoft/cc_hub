@@ -47,7 +47,11 @@ describe('AttachRegistry', () => {
 
     registry.register('/proj', client);
 
-    expect(registry.get('/proj')).toBe(client);
+    // The registry stores a copy (with the original cwd attached for event emission), so assert
+    // on the meaningful contract — same ws reference and client fields — not object identity.
+    const got = registry.get('/proj');
+    expect(got?.ws).toBe(ws);
+    expect(got).toMatchObject({ pid: client.pid, lastSeen: client.lastSeen });
     expect(registry.count()).toBe(1);
     expect(bus.emit).toHaveBeenCalledWith({ type: 'attach_status', cwd: '/proj', attached: true });
     registry.stop();

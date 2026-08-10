@@ -9,6 +9,7 @@ import type Database from 'better-sqlite3';
 import type { HubConfig, IAttachRegistry, IPromptDelivery, ILimitWatcher, Logger } from '../types.js';
 import type { HubBus } from '../core/bus.js';
 import { WsHub } from './wsHub.js';
+import { ADMIN_HTML } from './adminUi.js';
 
 type Bindings = { Bindings: HttpBindings };
 
@@ -105,6 +106,13 @@ export function buildApp(deps: BuildAppDeps): BuiltApp {
   app.route('/hooks', hooksRoutes);
   app.route('/api/v1', apiRoutes);
   app.all('/mcp', (c) => gateway.handle(c));
+
+  // Static admin page (view/edit/delete Athen notes + chat messages). Intentionally NOT gated by
+  // localhostGate or bearerAuth: the page itself is static and holds no data — every data call it
+  // makes goes through the bearer-authed /api/v1 routes above, same trust level as the mobile app.
+  // It's also inherently unreachable via the relay: relayClient.ts's isAllowedApiPath only
+  // forwards /api/v1/*, so /admin only ever works on the LAN.
+  app.get('/admin', (c) => c.html(ADMIN_HTML));
 
   app.get(
     '/ws',
