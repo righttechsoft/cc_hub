@@ -68,11 +68,21 @@ export function renderKbForm(state: KbFormState): string {
     ? '<p class="text-xs text-base-content/60 mb-2">New note</p>'
     : `<p class="text-xs text-base-content/60 mb-2">#${state.id} &middot; by ${esc(state.authorName)} &middot; updated ${esc(fmtTime(state.updatedAt))}</p>`;
   const errorHtml = state.error ? `<div class="alert alert-error text-sm mb-2"><span>${esc(state.error)}</span></div>` : '';
+  // Delete-confirm is Alpine-driven inline state (not htmx's native hx-confirm dialog): clicking
+  // Delete flips confirmingDelete, swapping in a "Yes, delete / Cancel" pair; only "Yes, delete"
+  // carries hx-delete, so the actual request only fires after that second, explicit click.
   const deleteBtn = state.isNew
     ? ''
-    : `<button type="button" class="btn btn-error btn-outline btn-sm mt-2"
-        hx-delete="/api/v1/admin/kb/${state.id}" hx-target="#kb-editor" hx-swap="innerHTML"
-        hx-confirm="Delete note #${state.id}?">Delete</button>`;
+    : `<div x-data="{ confirmingDelete: false }" class="mt-2">
+        <button type="button" x-show="!confirmingDelete" class="btn btn-error btn-outline btn-sm"
+          @click="confirmingDelete = true">Delete</button>
+        <div x-show="confirmingDelete" class="flex items-center gap-2">
+          <span class="text-sm text-base-content/70">Delete note #${state.id}?</span>
+          <button type="button" class="btn btn-error btn-sm"
+            hx-delete="/api/v1/admin/kb/${state.id}" hx-target="#kb-editor" hx-swap="innerHTML">Yes, delete</button>
+          <button type="button" class="btn btn-sm" @click="confirmingDelete = false">Cancel</button>
+        </div>
+      </div>`;
 
   return `<div>
     ${errorHtml}
@@ -112,11 +122,20 @@ export function renderMessagesList(messages: MessageRow[]): string {
     .map((m) => {
       const to = m.to_name ? esc(m.to_name) : '<span class="badge badge-error badge-sm">BROADCAST</span>';
       const urgent = m.urgent ? '<span class="badge badge-warning badge-sm">URGENT</span>' : '';
+      // Same Alpine-driven inline confirm pattern as the KB delete button (see renderKbForm):
+      // Delete flips confirmingDelete; only the "Yes" button carries hx-delete.
       return `<div class="card bg-base-200 p-3 mb-2" id="msg-${m.id}">
         <div class="flex justify-between items-start gap-2 mb-1">
           <span class="text-xs text-base-content/60">${esc(m.from_name)} &rarr; ${to} ${urgent} &middot; ${esc(fmtTime(m.created_at))}</span>
-          <button class="btn btn-error btn-xs" hx-delete="/api/v1/admin/messages/${m.id}" hx-target="#msg-${m.id}" hx-swap="outerHTML"
-            hx-confirm="Delete message #${m.id}?">Delete</button>
+          <div x-data="{ confirmingDelete: false }" class="flex items-center gap-1">
+            <button type="button" x-show="!confirmingDelete" class="btn btn-error btn-xs" @click="confirmingDelete = true">Delete</button>
+            <span x-show="confirmingDelete" class="flex items-center gap-1">
+              <span class="text-xs text-base-content/70">Sure?</span>
+              <button type="button" class="btn btn-error btn-xs"
+                hx-delete="/api/v1/admin/messages/${m.id}" hx-target="#msg-${m.id}" hx-swap="outerHTML">Yes</button>
+              <button type="button" class="btn btn-xs" @click="confirmingDelete = false">No</button>
+            </span>
+          </div>
         </div>
         <div class="whitespace-pre-wrap break-words text-sm">${esc(m.body)}</div>
       </div>`;
