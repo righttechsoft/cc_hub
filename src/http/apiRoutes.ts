@@ -558,7 +558,14 @@ export function buildApiRoutes(deps: BuildApiRoutesDeps): Hono {
 
   app.get('/admin/messages-list', (c) => {
     const limit = clamp(parseIntWithDefault(c.req.query('limit'), 50), 1, 200);
-    return c.html(renderMessagesList(messagesRepo.listAll(db, limit)));
+    // ?kind=broadcast|direct filters the list (a broadcast is a message with no recipient);
+    // anything else — including the default — shows all. Filtered AFTER the limit-read for
+    // simplicity: 50 recent rows is plenty for an admin skim, exactness isn't needed here.
+    const kind = c.req.query('kind');
+    let messages = messagesRepo.listAll(db, limit);
+    if (kind === 'broadcast') messages = messages.filter((m) => m.to_name === null);
+    else if (kind === 'direct') messages = messages.filter((m) => m.to_name !== null);
+    return c.html(renderMessagesList(messages));
   });
 
   app.delete('/admin/messages/:id', (c) => {

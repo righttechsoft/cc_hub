@@ -288,9 +288,16 @@ export const ADMIN_HTML = `<!doctype html>
     </div>
   </section>
 
-  <section x-show="tab === 'messages'" x-cloak>
-    <div class="flex items-center gap-3 mb-4">
-      <button type="button" class="btn-a btn-quiet" hx-get="/api/v1/admin/messages-list" hx-target="#msg-list" hx-swap="innerHTML">Refresh</button>
+  <section x-show="tab === 'messages'" x-cloak x-data="{ kind: 'all' }">
+    <div class="flex items-center gap-3 mb-4 flex-wrap">
+      <div class="flex gap-1.5">
+        <button type="button" class="btn-a" :class="kind === 'all' ? 'btn-brass' : 'btn-quiet'" @click="kind = 'all'"
+          hx-get="/api/v1/admin/messages-list" hx-target="#msg-list" hx-swap="innerHTML">All</button>
+        <button type="button" class="btn-a" :class="kind === 'broadcast' ? 'btn-brass' : 'btn-quiet'" @click="kind = 'broadcast'"
+          hx-get="/api/v1/admin/messages-list?kind=broadcast" hx-target="#msg-list" hx-swap="innerHTML">Broadcast</button>
+        <button type="button" class="btn-a" :class="kind === 'direct' ? 'btn-brass' : 'btn-quiet'" @click="kind = 'direct'"
+          hx-get="/api/v1/admin/messages-list?kind=direct" hx-target="#msg-list" hx-swap="innerHTML">Direct</button>
+      </div>
       <p class="text-xs" style="color:var(--muted)">Deleting an unread broadcast stops it being delivered to remaining instances.</p>
     </div>
     <div class="max-w-3xl" id="msg-list" hx-get="/api/v1/admin/messages-list" hx-trigger="load, msg-changed from:body" hx-target="this" hx-swap="innerHTML">

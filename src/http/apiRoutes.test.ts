@@ -575,6 +575,33 @@ describe('Admin fragment routes (htmx)', () => {
     expect(html).not.toContain('<script>alert(1)</script>');
   });
 
+  it('GET /admin/messages-list?kind= splits broadcast from direct', async () => {
+    const runner = fakeRunner();
+    const { app } = buildApp(runner);
+    await app.request('/messages', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ body: 'to-everyone' }),
+    });
+    await app.request('/messages', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ to: 'someinstance', body: 'to-one-peer' }),
+    });
+
+    const broadcast = await (await app.request('/admin/messages-list?kind=broadcast')).text();
+    expect(broadcast).toContain('to-everyone');
+    expect(broadcast).not.toContain('to-one-peer');
+
+    const direct = await (await app.request('/admin/messages-list?kind=direct')).text();
+    expect(direct).toContain('to-one-peer');
+    expect(direct).not.toContain('to-everyone');
+
+    const all = await (await app.request('/admin/messages-list')).text();
+    expect(all).toContain('to-everyone');
+    expect(all).toContain('to-one-peer');
+  });
+
   it('DELETE /admin/messages/:id removes the message; 404s when missing', async () => {
     const runner = fakeRunner();
     const { app } = buildApp(runner);
