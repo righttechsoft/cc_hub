@@ -31,6 +31,7 @@ function message(overrides: Partial<MessageRow> = {}): MessageRow {
     body: 'hello',
     urgent: 0,
     created_at: 1000,
+    summary: null,
     ...overrides,
   };
 }

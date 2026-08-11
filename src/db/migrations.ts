@@ -156,6 +156,10 @@ const MIGRATIONS: Migration[] = [
       );
     `,
   },
+  {
+    version: 4,
+    sql: 'ALTER TABLE messages ADD COLUMN summary TEXT',
+  },
 ];
 
 export function runMigrations(db: Database.Database): void {

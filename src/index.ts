@@ -22,6 +22,7 @@ import { buildApiRoutes } from './http/apiRoutes.js';
 import { buildApp } from './http/app.js';
 import { startRelayClient } from './relay/relayClient.js';
 import { startChatDelivery } from './chat/chatDelivery.js';
+import { startMessageSummarizer } from './chat/messageSummarizer.js';
 import { createEmbedder } from './kb/embedder.js';
 import { createAthen } from './kb/athen.js';
 import { startDesktopNotifier } from './notify/desktopNotifier.js';
@@ -54,6 +55,8 @@ const watcher: ILimitWatcher | undefined = config.limitWatcher.enabled
 const chatDelivery = config.chatDelivery.enabled
   ? startChatDelivery({ db, log, config, runner, bus, attach })
   : undefined;
+
+const messageSummarizer = startMessageSummarizer({ db, bus, config, log });
 
 const desktopNotifier = config.notifications.enabled
   ? startDesktopNotifier({ db, bus, config, log, attach })
@@ -154,6 +157,7 @@ function shutdown(signal: string): void {
   watcher?.stop();
   relay?.stop();
   chatDelivery?.stop();
+  messageSummarizer.stop();
   desktopNotifier?.stop();
   pushNotifier?.stop();
   apnsSender?.stop();

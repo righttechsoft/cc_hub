@@ -33,6 +33,7 @@ export function send(
     body,
     urgent: urgent ? 1 : 0,
     created_at: now,
+    summary: null,
   };
 }
 
@@ -120,6 +121,31 @@ export function listAll(db: Database.Database, limit = 50, beforeId?: number): M
     ) as MessageRow[];
   }
   return stmt(db, 'SELECT * FROM messages ORDER BY id DESC LIMIT ?').all(limit) as MessageRow[];
+}
+
+export function setSummary(db: Database.Database, id: number, summary: string): void {
+  stmt(db, 'UPDATE messages SET summary = ? WHERE id = ?').run(summary, id);
+}
+
+// Oldest-first so the startup backfill catches up in chronological order.
+export function listUnsummarized(db: Database.Database, sinceMs: number, limit = 50): MessageRow[] {
+  return stmt(
+    db,
+    'SELECT * FROM messages WHERE summary IS NULL AND created_at >= ? ORDER BY created_at ASC LIMIT ?'
+  ).all(sinceMs, limit) as MessageRow[];
+}
+
+// Messages from, to, or broadcast toward the given instance name, newest first — documents the
+// statusline's "recent activity for this instance" query and gets it test coverage.
+export function listRecentInvolving(db: Database.Database, name: string, limit = 5, sinceMs = 0): MessageRow[] {
+  return stmt(
+    db,
+    `SELECT * FROM messages
+     WHERE (from_name = ? OR to_name = ? OR to_name IS NULL)
+       AND created_at >= ?
+     ORDER BY created_at DESC
+     LIMIT ?`
+  ).all(name, name, sinceMs, limit) as MessageRow[];
 }
 
 // Deletes message_reads first (FK-references messages.id, foreign_keys is ON) then the message

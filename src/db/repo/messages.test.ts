@@ -60,4 +60,85 @@ describe('messages repo', () => {
 
     expect(messagesRepo.listChatDeliveredUnnotified(db, 'recipient')).toHaveLength(0);
   });
+
+  it('setSummary updates the summary field for a message', () => {
+    const db = buildDb();
+    const now = Date.now();
+
+    const message = messagesRepo.send(db, { from: 'a', to: 'b', body: 'text', urgent: false, now });
+    expect(message.summary).toBeNull();
+
+    messagesRepo.setSummary(db, message.id, 'fix bug');
+
+    const updated = db.prepare('SELECT * FROM messages WHERE id = ?').get(message.id) as typeof message;
+    expect(updated.summary).toBe('fix bug');
+  });
+
+  it('listUnsummarized returns only rows with NULL summary, oldest-first, respects sinceMs', () => {
+    const db = buildDb();
+    const now = Date.now();
+    const old = now - 48 * 60 * 60 * 1000;
+
+    const msg1 = messagesRepo.send(db, { from: 'a', to: 'b', body: 'first', urgent: false, now: old });
+    const msg2 = messagesRepo.send(db, { from: 'a', to: 'b', body: 'second', urgent: false, now });
+    const msg3 = messagesRepo.send(db, { from: 'a', to: 'b', body: 'third', urgent: false, now });
+
+    messagesRepo.setSummary(db, msg2.id, 'already summarized');
+
+    const window = now - 24 * 60 * 60 * 1000;
+    const result = messagesRepo.listUnsummarized(db, window, 50);
+
+    expect(result.map((m) => m.id)).toEqual([msg3.id]); // msg1 is outside window, msg2 is already summarized
+  });
+
+  it('listUnsummarized respects limit', () => {
+    const db = buildDb();
+    const now = Date.now();
+
+    for (let i = 0; i < 10; i++) {
+      messagesRepo.send(db, { from: 'a', to: 'b', body: `msg${i}`, urgent: false, now });
+    }
+
+    const result = messagesRepo.listUnsummarized(db, now - 1000, 3);
+    expect(result).toHaveLength(3);
+  });
+
+  it('listRecentInvolving returns messages from, to, or broadcast to the name, newest first', () => {
+    const db = buildDb();
+    const now = Date.now();
+
+    messagesRepo.send(db, { from: 'alice', to: 'bob', body: 'msg1', urgent: false, now });
+    messagesRepo.send(db, { from: 'charlie', to: 'alice', body: 'msg2', urgent: false, now: now + 1000 });
+    messagesRepo.send(db, { from: 'alice', to: null, body: 'broadcast', urgent: false, now: now + 2000 });
+    messagesRepo.send(db, { from: 'dave', to: 'eve', body: 'unrelated', urgent: false, now: now + 3000 });
+
+    const result = messagesRepo.listRecentInvolving(db, 'alice', 5, 0);
+
+    expect(result.map((m) => m.body)).toEqual(['broadcast', 'msg2', 'msg1']);
+  });
+
+  it('listRecentInvolving respects sinceMs', () => {
+    const db = buildDb();
+    const now = Date.now();
+    const old = now - 2000;
+
+    messagesRepo.send(db, { from: 'alice', to: 'bob', body: 'old', urgent: false, now: old });
+    messagesRepo.send(db, { from: 'alice', to: 'bob', body: 'new', urgent: false, now });
+
+    const result = messagesRepo.listRecentInvolving(db, 'alice', 5, now - 1000);
+
+    expect(result.map((m) => m.body)).toEqual(['new']);
+  });
+
+  it('listRecentInvolving respects limit', () => {
+    const db = buildDb();
+    const now = Date.now();
+
+    for (let i = 0; i < 10; i++) {
+      messagesRepo.send(db, { from: 'alice', to: 'bob', body: `msg${i}`, urgent: false, now: now + i });
+    }
+
+    const result = messagesRepo.listRecentInvolving(db, 'alice', 3);
+    expect(result).toHaveLength(3);
+  });
 });

@@ -48,6 +48,10 @@ export interface HubConfig {
     tickMs: number;
     maxSpawnsPerInstancePerHour: number;
   };
+  summaries: {
+    enabled: boolean;
+    model: string;
+  };
   attach: {
     enabled: boolean;
     heartbeatMs: number;
@@ -135,6 +139,7 @@ export interface MessageRow {
   body: string;
   urgent: number;
   created_at: number;
+  summary: string | null;
 }
 
 export interface KbNoteRow {

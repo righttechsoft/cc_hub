@@ -32,6 +32,7 @@ const defaults: HubConfig = {
     tickMs: 30000,
     maxSpawnsPerInstancePerHour: 4,
   },
+  summaries: { enabled: true, model: 'claude-haiku-4-5' },
   attach: { enabled: true, heartbeatMs: 30000, redactSecrets: true, fenceCodePastes: false, snippets: {} },
   athen: { embeddings: true, model: 'Xenova/all-MiniLM-L6-v2' },
   notifications: {
