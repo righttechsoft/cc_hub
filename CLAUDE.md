@@ -61,6 +61,10 @@ Athen (= *Athenaeum*, a library of collected knowledge) is the machine-wide memo
 
 The interactive-path templates (`messageFormat.ts`) explicitly instruct the agent to show the user each message (sender + full text) and state what it's doing about it — injected context and Stop block reasons are invisible in the terminal UI, so without this the agent could act on mail the human never saw.
 
+### Message summaries (`src/chat/messageSummarizer.ts`)
+
+Every inter-agent message gets a one-line AI summary (≤8 words, telegraphic) written once into `messages.summary` (migration v4): a bus `'message'` subscriber calls `claude-haiku-4-5` via the CC OAuth token (same fetch pattern as `needsInputFilter.ts`), serialized one-at-a-time, fail-soft (any failure leaves `summary` NULL), plus a 24h startup backfill (one-shot unref'd timer, athen-style). Config `summaries: { enabled, model }`. Consumers read the stored column — no AI call ever happens at render time (the user's statusline shows "→ taskmaster: fix the date bug" style lines from it).
+
 ### Chat delivery via fresh spawn (`src/chat/chatDelivery.ts`)
 
 Watcher-style loop (recursive setTimeout, `ticking` guard, `pokeNow()`, `stop()`). `chat_send` (MCP) and `POST /api/v1/messages` both call `pokeNow()` after inserting the message (optional `pokeChatDelivery` dep wired in `index.ts`), so recipients get mail near-instantly instead of on the next poll tick. Each tick (default 30s), for every instance (`instancesRepo.list`) with unread mail:
