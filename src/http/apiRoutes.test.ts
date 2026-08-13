@@ -590,6 +590,16 @@ describe('Admin fragment routes (htmx)', () => {
       body: JSON.stringify({ to: 'someinstance', body: 'to-one-peer' }),
     });
 
+    // Regression guard: bury the broadcast under >50 newer direct messages — the kind filter
+    // must constrain the SQL query, not a post-limit slice, or the broadcast silently vanishes.
+    for (let i = 0; i < 55; i++) {
+      await app.request('/messages', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ to: 'someinstance', body: `filler-${i}` }),
+      });
+    }
+
     const broadcast = await (await app.request('/admin/messages-list?kind=broadcast')).text();
     expect(broadcast).toContain('to-everyone');
     expect(broadcast).not.toContain('to-one-peer');

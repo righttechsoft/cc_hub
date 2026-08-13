@@ -558,13 +558,14 @@ export function buildApiRoutes(deps: BuildApiRoutesDeps): Hono {
 
   app.get('/admin/messages-list', (c) => {
     const limit = clamp(parseIntWithDefault(c.req.query('limit'), 50), 1, 200);
-    // ?kind=broadcast|direct filters the list (a broadcast is a message with no recipient);
-    // anything else — including the default — shows all. Filtered AFTER the limit-read for
-    // simplicity: 50 recent rows is plenty for an admin skim, exactness isn't needed here.
+    // ?kind=broadcast|direct filters the list in SQL (a broadcast is a message with no
+    // recipient). Filtering a post-limit slice instead once hid every broadcast older than the
+    // newest 50 direct messages — the filter must constrain the query itself.
     const kind = c.req.query('kind');
-    let messages = messagesRepo.listAll(db, limit);
-    if (kind === 'broadcast') messages = messages.filter((m) => m.to_name === null);
-    else if (kind === 'direct') messages = messages.filter((m) => m.to_name !== null);
+    const messages =
+      kind === 'broadcast' || kind === 'direct'
+        ? messagesRepo.listByKind(db, kind, limit)
+        : messagesRepo.listAll(db, limit);
     return c.html(renderMessagesList(messages));
   });
 

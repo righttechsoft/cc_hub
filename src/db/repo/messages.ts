@@ -123,6 +123,18 @@ export function listAll(db: Database.Database, limit = 50, beforeId?: number): M
   return stmt(db, 'SELECT * FROM messages ORDER BY id DESC LIMIT ?').all(limit) as MessageRow[];
 }
 
+// Kind-filtered listing (broadcast = no recipient). The filter MUST live in SQL, not on a
+// slice of listAll(): filtering the newest-N rows after the fact silently hides any broadcast
+// older than the last N direct messages ("no broadcasts" while broadcasts exist).
+export function listByKind(
+  db: Database.Database,
+  kind: 'broadcast' | 'direct',
+  limit = 50
+): MessageRow[] {
+  const where = kind === 'broadcast' ? 'to_name IS NULL' : 'to_name IS NOT NULL';
+  return stmt(db, `SELECT * FROM messages WHERE ${where} ORDER BY id DESC LIMIT ?`).all(limit) as MessageRow[];
+}
+
 export function setSummary(db: Database.Database, id: number, summary: string): void {
   stmt(db, 'UPDATE messages SET summary = ? WHERE id = ?').run(summary, id);
 }
