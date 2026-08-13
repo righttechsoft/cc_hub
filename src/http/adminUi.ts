@@ -122,9 +122,16 @@ export function renderErrorFragment(message: string): string {
 
 // --- Messages fragments ---
 
-export function renderMessagesList(messages: MessageRow[]): string {
+// opts.pageSize enables pagination: when the page came back full, a Load-more button is
+// appended that fetches the next page (same kind, beforeId = oldest id shown) and REPLACES
+// ITSELF with it — the standard htmx incremental-list pattern. Broadcast listings pass no
+// opts (they list unpaged; rare + they're the cleanup target).
+export function renderMessagesList(
+  messages: MessageRow[],
+  opts?: { kind?: 'direct'; pageSize?: number }
+): string {
   if (messages.length === 0) return '<p class="empty-note">No messages.</p>';
-  return messages
+  const cards = messages
     .map((m) => {
       const to = m.to_name ? `<span class="peer">${esc(m.to_name)}</span>` : '<span class="badge-brass">BROADCAST</span>';
       const urgent = m.urgent ? '<span class="badge-danger">URGENT</span>' : '';
@@ -147,6 +154,15 @@ export function renderMessagesList(messages: MessageRow[]): string {
       </div>`;
     })
     .join('');
+
+  const pageFull = opts?.pageSize !== undefined && messages.length === opts.pageSize;
+  if (!pageFull) return cards;
+  const oldestId = messages[messages.length - 1].id;
+  const kindParam = opts?.kind ? `&kind=${opts.kind}` : '';
+  const loadMore = `<button type="button" class="btn-a btn-quiet w-full"
+    hx-get="/api/v1/admin/messages-list?beforeId=${oldestId}${kindParam}" hx-swap="outerHTML">
+    Load older</button>`;
+  return cards + loadMore;
 }
 
 // --- Page shell ---

@@ -600,17 +600,27 @@ describe('Admin fragment routes (htmx)', () => {
       });
     }
 
+    // Broadcasts list unpaged (SQL-filtered) — a broadcast buried under 55 newer direct
+    // messages must still appear. A post-limit slice filter once hid exactly this.
     const broadcast = await (await app.request('/admin/messages-list?kind=broadcast')).text();
     expect(broadcast).toContain('to-everyone');
     expect(broadcast).not.toContain('to-one-peer');
 
+    // Direct pages 50 at a time: page 1 holds the newest fillers + a Load-older trailer whose
+    // beforeId walk reaches the buried first direct message on page 2.
     const direct = await (await app.request('/admin/messages-list?kind=direct')).text();
-    expect(direct).toContain('to-one-peer');
-    expect(direct).not.toContain('to-everyone');
+    expect(direct).toContain('filler-54');
+    expect(direct).not.toContain('to-one-peer');
+    expect(direct).toContain('Load older');
+    const beforeId = /beforeId=(\d+)/.exec(direct)?.[1];
+    expect(beforeId).toBeTruthy();
+    const direct2 = await (await app.request(`/admin/messages-list?kind=direct&beforeId=${beforeId}`)).text();
+    expect(direct2).toContain('to-one-peer');
+    expect(direct2).not.toContain('to-everyone');
 
     const all = await (await app.request('/admin/messages-list')).text();
-    expect(all).toContain('to-everyone');
-    expect(all).toContain('to-one-peer');
+    expect(all).toContain('filler-54');
+    expect(all).toContain('Load older');
   });
 
   it('DELETE /admin/messages/:id removes the message; 404s when missing', async () => {

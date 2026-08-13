@@ -557,16 +557,25 @@ export function buildApiRoutes(deps: BuildApiRoutesDeps): Hono {
   });
 
   app.get('/admin/messages-list', (c) => {
-    const limit = clamp(parseIntWithDefault(c.req.query('limit'), 50), 1, 200);
-    // ?kind=broadcast|direct filters the list in SQL (a broadcast is a message with no
-    // recipient). Filtering a post-limit slice instead once hid every broadcast older than the
-    // newest 50 direct messages — the filter must constrain the query itself.
+    // ?kind=broadcast|direct filters in SQL (a broadcast has no recipient). Filtering a
+    // post-limit slice instead once hid every broadcast older than the newest 50 direct
+    // messages — the filter must constrain the query itself.
+    // Broadcasts are rare and the admin's cleanup target, so they list without paging (high
+    // sanity cap only); All/Direct page 50 at a time via beforeId + a Load-more fragment.
     const kind = c.req.query('kind');
+    const beforeIdParam = c.req.query('beforeId');
+    const beforeId = beforeIdParam !== undefined ? Number(beforeIdParam) : undefined;
+    if (beforeId !== undefined && !Number.isInteger(beforeId)) return badRequest(c, 'invalid beforeId');
+
+    if (kind === 'broadcast') {
+      return c.html(renderMessagesList(messagesRepo.listByKind(db, 'broadcast', 500)));
+    }
+    const pageSize = clamp(parseIntWithDefault(c.req.query('limit'), 50), 1, 200);
     const messages =
-      kind === 'broadcast' || kind === 'direct'
-        ? messagesRepo.listByKind(db, kind, limit)
-        : messagesRepo.listAll(db, limit);
-    return c.html(renderMessagesList(messages));
+      kind === 'direct'
+        ? messagesRepo.listByKind(db, 'direct', pageSize, beforeId)
+        : messagesRepo.listAll(db, pageSize, beforeId);
+    return c.html(renderMessagesList(messages, { kind: kind === 'direct' ? 'direct' : undefined, pageSize }));
   });
 
   app.delete('/admin/messages/:id', (c) => {
