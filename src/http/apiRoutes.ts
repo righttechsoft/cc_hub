@@ -34,6 +34,7 @@ import {
   renderKbList,
   renderKbSearchResults,
   renderMessagesList,
+  renderSessionsList,
 } from './adminUi.js';
 
 export interface BuildApiRoutesDeps {
@@ -133,7 +134,7 @@ function formStr(v: unknown): string {
 }
 
 export function buildApiRoutes(deps: BuildApiRoutesDeps): Hono {
-  const { config, db, bus, log, delivery, watcher, runner, athen, startedAt, pokeChatDelivery } = deps;
+  const { config, db, bus, log, delivery, watcher, runner, athen, startedAt, pokeChatDelivery, attach } = deps;
   const app = new Hono();
 
   app.get('/health', (c) => {
@@ -554,6 +555,24 @@ export function buildApiRoutes(deps: BuildApiRoutesDeps): Hono {
 
     c.header('HX-Trigger', 'kb-changed');
     return c.html(renderKbEditorEmpty());
+  });
+
+  // Live sessions (everything not 'ended'), newest activity first, decorated with the attach
+  // registry's live-terminal + working flags. Polled by the admin page every 5s.
+  app.get('/admin/sessions-list', (c) => {
+    const sessions = sessionsRepo
+      .listJoined(db, { status: ['active', 'idle', 'interrupted', 'continuing'] })
+      .map((s) => ({
+        id: s.id,
+        instance_name: s.instance_name,
+        cwd: s.cwd,
+        status: s.status,
+        last_event_at: s.last_event_at,
+        last_prompt: s.last_prompt,
+        attached: attach.get(s.cwd) !== undefined,
+        working: attach.isWorking(s.cwd),
+      }));
+    return c.html(renderSessionsList(sessions));
   });
 
   app.get('/admin/messages-list', (c) => {

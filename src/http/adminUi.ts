@@ -165,6 +165,62 @@ export function renderMessagesList(
   return cards + loadMore;
 }
 
+// --- Sessions fragment ---
+
+function relTime(ms: number | null | undefined): string {
+  if (!ms) return '';
+  const s = Math.max(0, Math.floor((Date.now() - ms) / 1000));
+  if (s < 60) return `${s}s ago`;
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${m}m ago`;
+  const h = Math.floor(m / 60);
+  if (h < 24) return `${h}h ago`;
+  return `${Math.floor(h / 24)}d ago`;
+}
+
+const SESSION_DOT_COLOR: Record<string, string> = {
+  active: '#4CAF7D',
+  idle: 'var(--muted)',
+  interrupted: 'var(--danger)',
+  continuing: 'var(--brass)',
+};
+
+export interface SessionListItem {
+  id: string;
+  instance_name: string | null;
+  cwd: string;
+  status: string;
+  last_event_at: number;
+  last_prompt: string | null;
+  attached: boolean;
+  working: boolean;
+}
+
+export function renderSessionsList(sessions: SessionListItem[]): string {
+  if (sessions.length === 0) return '<p class="empty-note">No live sessions.</p>';
+  return sessions
+    .map((s) => {
+      const dot = SESSION_DOT_COLOR[s.status] ?? 'var(--muted)';
+      const live = s.attached ? '<span class="badge-brass">LIVE</span>' : '';
+      const working = s.working ? '<span class="badge-brass" title="claude is working">&#9889;</span>' : '';
+      const prompt = s.last_prompt
+        ? `<div class="snippet mt-1">${esc(s.last_prompt)}</div>`
+        : '';
+      return `<div class="card-a p-3 mb-2">
+        <div class="flex items-center gap-2 flex-wrap">
+          <span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:${dot}"></span>
+          <span class="font-semibold text-sm">${esc(s.instance_name ?? s.id.slice(0, 8))}</span>
+          <span class="meta-line !mt-0">${esc(s.status)}</span>
+          ${live} ${working}
+          <span class="meta-line !mt-0 ml-auto">${esc(relTime(s.last_event_at))}</span>
+        </div>
+        <div class="meta-line">${esc(s.cwd)} &middot; ${esc(s.id.slice(0, 8))}</div>
+        ${prompt}
+      </div>`;
+    })
+    .join('');
+}
+
 // --- Page shell ---
 // CDN versions pinned as of writing (all fetched and confirmed live): htmx.org 2.0.10,
 // alpinejs 3.15.12, flyonui 2.4.1 (ships flat as flyonui.css/flyonui.js, no dist/ subpath),
@@ -281,6 +337,7 @@ export const ADMIN_HTML = `<!doctype html>
 <nav class="max-w-6xl mx-auto px-6 mt-6 flex gap-7" style="border-bottom:1px solid var(--line)">
   <button type="button" class="tab-a" :class="tab === 'athen' ? 'tab-on' : ''" @click="tab = 'athen'">Athen</button>
   <button type="button" class="tab-a" :class="tab === 'messages' ? 'tab-on' : ''" @click="tab = 'messages'">Messages</button>
+  <button type="button" class="tab-a" :class="tab === 'sessions' ? 'tab-on' : ''" @click="tab = 'sessions'">Sessions</button>
 </nav>
 
 <main class="max-w-6xl mx-auto px-6 py-6">
@@ -317,6 +374,13 @@ export const ADMIN_HTML = `<!doctype html>
       <p class="text-xs" style="color:var(--muted)">Deleting an unread broadcast stops it being delivered to remaining instances.</p>
     </div>
     <div class="max-w-3xl" id="msg-list" hx-get="/api/v1/admin/messages-list" hx-trigger="load, msg-changed from:body" hx-target="this" hx-swap="innerHTML">
+      <p class="empty-note">Loading&hellip;</p>
+    </div>
+  </section>
+
+  <section x-show="tab === 'sessions'" x-cloak>
+    <p class="text-xs mb-4" style="color:var(--muted)">Live Claude Code sessions across all instances. LIVE = open in a cc-attach terminal; &#9889; = claude is working right now. Refreshes every 5s.</p>
+    <div class="max-w-3xl" id="sessions-list" hx-get="/api/v1/admin/sessions-list" hx-trigger="load, every 5s" hx-target="this" hx-swap="innerHTML">
       <p class="empty-note">Loading&hellip;</p>
     </div>
   </section>

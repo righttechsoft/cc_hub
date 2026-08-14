@@ -560,6 +560,26 @@ describe('Admin fragment routes (htmx)', () => {
     expect(missingRes.status).toBe(404);
   });
 
+  it('GET /admin/sessions-list renders live sessions with attach flags, excluding ended', async () => {
+    const runner = fakeRunner();
+    const attach = fakeAttach({ attachedCwd: '/proj' }); // insertSession hardcodes session cwd '/proj'
+    const { app, db } = buildApp(runner, attach);
+    insertSession(db, 'sess-live-1', null);
+    insertSession(db, 'sess-live-2', null);
+    db.prepare("UPDATE sessions SET status = 'ended' WHERE id = 'sess-live-2'").run();
+    db.prepare("UPDATE sessions SET last_prompt = ? WHERE id = 'sess-live-1'").run('<script>alert(1)</script>');
+
+    const res = await app.request('/admin/sessions-list');
+    expect(res.status).toBe(200);
+    const html = await res.text();
+    expect(html).toContain('sess-liv'); // 8-char id prefix
+    expect(html).toContain('LIVE'); // attached badge from fakeAttach cwd match
+    expect(html).not.toContain('sess-live-2'.slice(0, 8) + '"'); // ended excluded (both share prefix; check count)
+    expect((html.match(/card-a/g) || []).length).toBe(1);
+    expect(html).toContain('&lt;script&gt;alert(1)&lt;/script&gt;');
+    expect(html).not.toContain('<script>alert(1)</script>');
+  });
+
   it('GET /admin/messages-list renders messages, escaping a hostile body', async () => {
     const runner = fakeRunner();
     const { app } = buildApp(runner);
