@@ -17,7 +17,7 @@ import type {
   PermissionStatus,
 } from '../types.js';
 import type { HubBus } from '../core/bus.js';
-import * as instancesRepo from '../db/repo/instances.js';
+import * as instanceAppsRepo from '../db/repo/instanceApps.js';
 import * as sessionsRepo from '../db/repo/sessions.js';
 import * as promptsRepo from '../db/repo/prompts.js';
 import * as eventsRepo from '../db/repo/events.js';
@@ -30,7 +30,7 @@ import type { Athen } from '../kb/athen.js';
 import { readTranscript } from './transcriptRead.js';
 import {
   renderErrorFragment,
-  renderInstanceUrls,
+  renderInstanceApps,
   renderKbEditorEmpty,
   renderKbForm,
   renderKbList,
@@ -577,11 +577,12 @@ export function buildApiRoutes(deps: BuildApiRoutesDeps): Hono {
     return c.html(renderSessionsList(sessions));
   });
 
-  // Persistent footer: instances that have told the hub an app/dev-server URL (via the
-  // hub_set_url MCP tool, or captured automatically from cc-attach's 'url' output-trigger
-  // notice — see app.ts's /attach handler), most recently updated first. Polled every 15s.
+  // Persistent footer: apps/servers instances have told the hub they're running (via the
+  // hub_set_apps/hub_set_url MCP tools, or captured automatically from cc-attach's 'url'
+  // output-trigger notice — see app.ts's /attach handler), grouped per instance, most recently
+  // updated first. Polled every 15s.
   app.get('/admin/instance-urls', (c) => {
-    return c.html(renderInstanceUrls(instancesRepo.listWithAppUrl(db)));
+    return c.html(renderInstanceApps(instanceAppsRepo.listAllJoined(db)));
   });
 
   app.get('/admin/messages-list', (c) => {

@@ -2,14 +2,14 @@ import { describe, expect, it } from 'vitest';
 import {
   esc,
   renderErrorFragment,
-  renderInstanceUrls,
+  renderInstanceApps,
   renderKbEditorEmpty,
   renderKbForm,
   renderKbList,
   renderKbSearchResults,
   renderMessagesList,
 } from './adminUi.js';
-import type { InstanceRow, KbNoteRow, KbSearchResult, MessageRow } from '../types.js';
+import type { InstanceAppJoined, KbNoteRow, KbSearchResult, MessageRow } from '../types.js';
 
 function note(overrides: Partial<KbNoteRow> = {}): KbNoteRow {
   return {
@@ -134,43 +134,68 @@ describe('renderKbEditorEmpty / renderErrorFragment', () => {
   });
 });
 
-function instance(overrides: Partial<InstanceRow> = {}): InstanceRow {
+function app(overrides: Partial<InstanceAppJoined> = {}): InstanceAppJoined {
   return {
     id: 1,
-    name: 'alpha',
-    cwd: '/alpha',
-    alias: null,
-    first_seen_at: 1000,
-    last_seen_at: 1000,
-    app_url: 'http://localhost:5173',
-    app_url_at: 2000,
+    instance_id: 1,
+    instance_name: 'alpha',
+    label: 'localhost:5173',
+    url: 'http://localhost:5173',
+    updated_at: 2000,
     ...overrides,
   };
 }
 
-describe('renderInstanceUrls', () => {
-  it('renders a link with the instance name and URL', () => {
-    const html = renderInstanceUrls([instance()]);
+describe('renderInstanceApps', () => {
+  it('renders a web app as a brass link with the instance name', () => {
+    const html = renderInstanceApps([app()]);
     expect(html).toContain('href="http://localhost:5173"');
-    expect(html).toContain('http://localhost:5173');
+    expect(html).toContain('localhost:5173');
     expect(html).toContain('alpha');
     expect(html).toContain('target="_blank"');
   });
 
-  it('escapes a hostile instance name', () => {
-    const html = renderInstanceUrls([instance({ name: '<script>alert(1)</script>' })]);
-    expect(html).not.toContain('<script>alert(1)</script>');
-    expect(html).toContain('&lt;script&gt;alert(1)&lt;/script&gt;');
-  });
-
-  it('renders a non-http(s) url as plain text, without an anchor', () => {
-    const html = renderInstanceUrls([instance({ app_url: 'javascript:alert(1)' })]);
+  it('renders a desktop app (url null) as plain text, without an anchor', () => {
+    const html = renderInstanceApps([app({ label: 'desktop app', url: null })]);
     expect(html).not.toContain('<a ');
-    expect(html).toContain('javascript:alert(1)');
+    expect(html).toContain('desktop app');
   });
 
-  it('returns an empty string when there are no instances', () => {
-    expect(renderInstanceUrls([])).toBe('');
+  it('escapes a hostile instance name and label', () => {
+    const html = renderInstanceApps([
+      app({ instance_name: '<script>alert(1)</script>', label: '<b>evil</b>', url: null }),
+    ]);
+    expect(html).not.toContain('<script>alert(1)</script>');
+    expect(html).not.toContain('<b>evil</b>');
+    expect(html).toContain('&lt;script&gt;alert(1)&lt;/script&gt;');
+    expect(html).toContain('&lt;b&gt;evil&lt;/b&gt;');
+  });
+
+  it('renders a non-http(s) url as a plain label, without an anchor and without leaking the url text', () => {
+    const html = renderInstanceApps([app({ url: 'javascript:alert(1)' })]);
+    expect(html).not.toContain('<a ');
+    expect(html).not.toContain('javascript:alert(1)');
+    expect(html).toContain('localhost:5173'); // falls back to showing the label, same as a desktop app
+  });
+
+  it('groups multiple apps under one instance', () => {
+    const html = renderInstanceApps([
+      app({ id: 1, label: 'localhost:3000', url: 'http://localhost:3000' }),
+      app({ id: 2, label: 'localhost:4000', url: 'http://localhost:4000' }),
+    ]);
+    expect((html.match(/alpha/g) || []).length).toBe(1);
+    expect(html).toContain('localhost:3000');
+    expect(html).toContain('localhost:4000');
+  });
+
+  it('keeps separate instances as separate groups', () => {
+    const html = renderInstanceApps([app({ instance_name: 'alpha' }), app({ instance_name: 'beta', id: 2 })]);
+    expect(html).toContain('alpha');
+    expect(html).toContain('beta');
+  });
+
+  it('returns an empty string when there are no rows', () => {
+    expect(renderInstanceApps([])).toBe('');
   });
 });
 

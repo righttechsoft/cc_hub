@@ -5,6 +5,7 @@ import type { Logger } from '../types.js';
 import type { HubBus } from '../core/bus.js';
 import { instanceNameFromCwd } from '../core/identity.js';
 import * as instances from '../db/repo/instances.js';
+import * as instanceApps from '../db/repo/instanceApps.js';
 import * as sessions from '../db/repo/sessions.js';
 import * as messages from '../db/repo/messages.js';
 import * as kb from '../db/repo/kb.js';
@@ -222,7 +223,9 @@ export function registerHubTools(server: McpServer, ctx: HubToolsContext): void 
       description:
         "Tell the hub the URL of the app/dev server this instance is running — it's shown in the hub's admin " +
         'UI. Call it whenever you start or change a local server (e.g. after `npm run dev` prints ' +
-        '"Local: http://localhost:5173/"). Requires hub_register to have been called first this session.',
+        '"Local: http://localhost:5173/"). Requires hub_register to have been called first this session. ' +
+        'For an instance running multiple apps (several web servers, or a mix of web + desktop apps), use ' +
+        'hub_set_apps instead.',
       inputSchema: {
         url: z
           .string()
@@ -245,9 +248,58 @@ export function registerHubTools(server: McpServer, ctx: HubToolsContext): void 
       const instance = instances.byCwd(ctx.db, identity.cwd);
       if (!instance) return notRegistered();
 
-      instances.setAppUrl(ctx.db, instance.id, args.url, Date.now());
+      const now = Date.now();
+      instances.setAppUrl(ctx.db, instance.id, args.url, now);
+      instanceApps.upsert(ctx.db, instance.id, instanceApps.labelFromUrl(args.url), args.url, now);
 
       return jsonResult({ ok: true, url: args.url });
+    }
+  );
+
+  server.registerTool(
+    'hub_set_apps',
+    {
+      description:
+        'Declare the apps/servers this instance is currently running (web apps with url, desktop apps ' +
+        "label-only) — shown in the hub admin footer and the user's statusline. Call with the full current " +
+        'list whenever it changes; call with [] when they stop. Replaces this instance\'s whole list — it ' +
+        'is not additive. Requires hub_register to have been called first this session.',
+      inputSchema: {
+        apps: z
+          .array(
+            z.object({
+              label: z.string().min(1).max(60).describe('Short name for the app, e.g. "localhost:5173" or "desktop app".'),
+              url: z
+                .string()
+                .max(APP_URL_MAX_LENGTH)
+                .optional()
+                .describe('Full URL (must start with http:// or https://), for a web app. Omit for a desktop app.'),
+            })
+          )
+          .max(10)
+          .describe('The complete current list of running apps — pass [] to clear.'),
+      },
+    },
+    (args) => {
+      const identity = ctx.getIdentity();
+      if (!identity) return notRegistered();
+
+      const badUrl = args.apps.find((a) => a.url !== undefined && !HTTP_URL_RE.test(a.url));
+      if (badUrl) {
+        return {
+          isError: true as const,
+          content: [
+            { type: 'text' as const, text: `url must start with http:// or https:// (got "${badUrl.label}")` },
+          ],
+        };
+      }
+
+      const instance = instances.byCwd(ctx.db, identity.cwd);
+      if (!instance) return notRegistered();
+
+      instanceApps.replaceAll(ctx.db, instance.id, args.apps, Date.now());
+
+      return jsonResult({ ok: true, apps: args.apps });
     }
   );
 

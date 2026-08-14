@@ -16,7 +16,7 @@
 // monospace for ids/tags/timestamps. Signature detail: note rows read as book spines — a thin
 // brass rule on the left edge that brightens on hover/selection. Tokens live in :root below;
 // change the palette there, not inline.
-import type { InstanceRow, KbNoteRow, KbSearchResult, MessageRow } from '../types.js';
+import type { InstanceAppJoined, KbNoteRow, KbSearchResult, MessageRow } from '../types.js';
 
 const ESCAPE_MAP: Record<string, string> = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' };
 
@@ -221,25 +221,46 @@ export function renderSessionsList(sessions: SessionListItem[]): string {
     .join('');
 }
 
-// --- Instance app-URL footer ---
+// --- Instance running-apps footer ---
 
 const HTTP_URL_RE = /^https?:\/\//i;
 
-// Rows are already filtered to app_url IS NOT NULL + ordered by instancesRepo.listWithAppUrl.
-// Renders the footer bar's *contents* only (a flex-wrap parent lives in the page shell below) —
-// an empty list collapses to '', so the footer bar reads as empty rather than showing stale markup.
-export function renderInstanceUrls(instances: InstanceRow[]): string {
-  if (instances.length === 0) return '';
-  return instances
-    .map((inst) => {
-      const name = `<span class="mono" style="color:var(--muted)">${esc(inst.name)}</span>`;
-      const raw = inst.app_url ?? '';
-      // Defense in depth against a hand-inserted DB row: only emit an anchor for a value that
-      // still passes the http(s) check at render time, else show it as inert text.
-      const url = HTTP_URL_RE.test(raw)
-        ? `<a class="link-brass" href="${esc(raw)}" target="_blank" rel="noopener noreferrer">${esc(raw)}</a>`
-        : `<span>${esc(raw)}</span>`;
-      return `<span class="flex items-center gap-1.5">${name} ${url}</span>`;
+// Rows come from instanceAppsRepo.listAllJoined (most recently updated app first, across all
+// instances). Groups them per instance, preserving that ordering — an instance's group appears
+// where its most-recently-updated app falls, and apps within a group keep the same relative
+// order. Renders the footer bar's *contents* only (a flex-wrap parent lives in the page shell
+// below) — an empty list collapses to '', so the footer bar reads as empty rather than stale markup.
+export function renderInstanceApps(rows: InstanceAppJoined[]): string {
+  if (rows.length === 0) return '';
+
+  const order: string[] = [];
+  const groups = new Map<string, InstanceAppJoined[]>();
+  for (const row of rows) {
+    let group = groups.get(row.instance_name);
+    if (!group) {
+      group = [];
+      groups.set(row.instance_name, group);
+      order.push(row.instance_name);
+    }
+    group.push(row);
+  }
+
+  return order
+    .map((name) => {
+      const nameHtml = `<span class="mono" style="color:var(--muted)">${esc(name)}</span>`;
+      const appsHtml = groups
+        .get(name)!
+        .map((app) => {
+          // Defense in depth against a hand-inserted DB row: only emit an anchor for a value that
+          // still passes the http(s) check at render time, else show it as an inert label — same
+          // treatment a desktop app (url === null) gets.
+          if (app.url && HTTP_URL_RE.test(app.url)) {
+            return `<a class="link-brass" href="${esc(app.url)}" target="_blank" rel="noopener noreferrer" title="${esc(app.url)}">${esc(app.label)}</a>`;
+          }
+          return `<span style="color:var(--muted)">${esc(app.label)}</span>`;
+        })
+        .join(' ');
+      return `<span class="flex items-center gap-1.5">${nameHtml} ${appsHtml}</span>`;
     })
     .join('');
 }

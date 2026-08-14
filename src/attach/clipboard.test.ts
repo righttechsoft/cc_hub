@@ -29,7 +29,10 @@ describe('parseClipboardOutput', () => {
   });
 });
 
-describe.skipIf(process.platform !== 'win32')('readClipboardForPaste (Windows)', () => {
+// Opt-in only (CC_HUB_CLIPBOARD_TESTS=1): this test OVERWRITES the user's real OS clipboard and
+// races whatever they're copying at that moment — it was the suite's intermittent flake, and a
+// default test run must not clobber the user's clipboard contents anyway.
+describe.skipIf(process.platform !== 'win32' || process.env.CC_HUB_CLIPBOARD_TESTS !== '1')('readClipboardForPaste (Windows)', () => {
   it('round-trips text set via Set-Clipboard', async () => {
     await execFileAsync('powershell', ['-NoProfile', '-NonInteractive', '-Command', "Set-Clipboard -Value 'cchub_test_123'"]);
     const result = await readClipboardForPaste();

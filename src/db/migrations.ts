@@ -167,6 +167,19 @@ const MIGRATIONS: Migration[] = [
       ALTER TABLE instances ADD COLUMN app_url_at INTEGER;
     `,
   },
+  {
+    version: 6,
+    sql: `
+      CREATE TABLE IF NOT EXISTS instance_apps (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        instance_id INTEGER NOT NULL REFERENCES instances(id),
+        label TEXT NOT NULL,
+        url TEXT,
+        updated_at INTEGER NOT NULL,
+        UNIQUE(instance_id, label)
+      );
+    `,
+  },
 ];
 
 export function runMigrations(db: Database.Database): void {

@@ -134,7 +134,8 @@ Ctrl+G is only intercepted while `attach.snippets` has at least one entry; the d
 | `athen_save` | Save a reusable know-how note (title, body, tags) to Athen, the shared know-how store. Notes are embedded locally for semantic search |
 | `athen_search` | Search Athen by meaning, not exact words — hybrid of vector KNN (sqlite-vec + local MiniLM embeddings) and full-text (FTS5 + BM25), fused by reciprocal rank. Degrades to full-text-only if embeddings are unavailable |
 | `athen_get` | Fetch a note's full body by id |
-| `hub_set_url` | Tell the hub the URL of the app/dev server this instance is running (e.g. `http://localhost:5173`) — shown in the admin page's footer |
+| `hub_set_url` | Tell the hub the URL of the app/dev server this instance is running (e.g. `http://localhost:5173`) — shown in the admin page's footer. Convenience sugar for a single web app; see `hub_set_apps` for multiple |
+| `hub_set_apps` | Declare the full list of apps/servers this instance is currently running — web apps with a `url`, desktop apps label-only — replacing the instance's previous list. Call with `[]` when they all stop |
 
 Instance identity is derived from the project directory (basename, with automatic disambiguation on collisions).
 
@@ -201,7 +202,7 @@ Base URL: `http://<lan-ip>:<port>/api/v1`. Every request needs `Authorization: B
 
 ### Admin page
 
-Browse to `http://<hub-ip>:4270/admin` for a small built-in web UI to view, edit, and delete Athen notes and chat/broadcast messages — handy for cleaning up a bad note or a stray broadcast without the mobile app. A sticky footer at the bottom of the page lists every instance that has told the hub an app/dev-server URL (via the `hub_set_url` MCP tool, or captured automatically from `cc-attach`'s dev-server URL detection), each as a clickable link. Paste your `authToken` (from `config.json`) into the token field once; it's saved in the browser's `localStorage` and sent as a bearer token on every call. The page itself is a single static HTML file with no login of its own — same LAN-only trust model as the mobile app — and isn't reachable through the Cloudflare relay (only `/api/v1/*` and `/ws` are forwarded).
+Browse to `http://<hub-ip>:4270/admin` for a small built-in web UI to view, edit, and delete Athen notes and chat/broadcast messages — handy for cleaning up a bad note or a stray broadcast without the mobile app. A sticky footer at the bottom of the page lists every instance's running apps (declared via the `hub_set_apps`/`hub_set_url` MCP tools, or captured automatically from `cc-attach`'s dev-server URL detection), grouped per instance — web apps as clickable links, desktop apps as plain labels. Paste your `authToken` (from `config.json`) into the token field once; it's saved in the browser's `localStorage` and sent as a bearer token on every call. The page itself is a single static HTML file with no login of its own — same LAN-only trust model as the mobile app — and isn't reachable through the Cloudflare relay (only `/api/v1/*` and `/ws` are forwarded).
 
 Built with [htmx](https://htmx.org/) + [Alpine.js](https://alpinejs.dev/) + [FlyonUI](https://flyonui.com/) loaded from CDN (pinned versions, SRI-hashed) — no build step, no bundling, same "no build step" posture as the rest of cc_hub. htmx drives the data (list/search/edit/delete against small HTML-fragment routes under `/api/v1/admin/*`, so it's bearer-authed and relay-forwardable even though the page itself isn't); Alpine handles pure client state (active tab, the token field); FlyonUI/Tailwind supply the dark-theme styling. The fragment routes are thin wrappers over the same repo/Athen calls the JSON `/kb` and `/messages` routes above use.
 

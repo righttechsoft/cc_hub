@@ -115,6 +115,20 @@ export interface InstanceRow {
   app_url_at: number | null;
 }
 
+export interface InstanceAppRow {
+  id: number;
+  instance_id: number;
+  // Identity within the instance (UNIQUE(instance_id, label)) — e.g. "localhost:5173" for a web
+  // app or a free-form name for a desktop app. url is null for a desktop app (no address to link).
+  label: string;
+  url: string | null;
+  updated_at: number;
+}
+
+export interface InstanceAppJoined extends InstanceAppRow {
+  instance_name: string;
+}
+
 export interface SessionRow {
   id: string;
   instance_id: number;

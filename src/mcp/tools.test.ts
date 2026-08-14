@@ -4,6 +4,7 @@ import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { runMigrations } from '../db/migrations.js';
 import { HubBus } from '../core/bus.js';
 import * as instancesRepo from '../db/repo/instances.js';
+import * as instanceAppsRepo from '../db/repo/instanceApps.js';
 import { createAthen } from '../kb/athen.js';
 import type { Embedder } from '../kb/embedder.js';
 import { registerHubTools, type HubToolsContext } from './tools.js';
@@ -111,6 +112,18 @@ describe('hub_set_url', () => {
     expect(instance?.app_url_at).toEqual(expect.any(Number));
   });
 
+  it('also upserts an instance_apps row keyed by the url\'s host:port', () => {
+    const db = buildDb();
+    const instance = instancesRepo.upsert(db, { name: 'alpha', cwd: '/alpha', now: Date.now() });
+
+    const tools = captureTools(buildCtx(db));
+    tools.get('hub_set_url')!({ url: 'http://localhost:5173' });
+
+    const apps = instanceAppsRepo.listForInstance(db, instance.id);
+    expect(apps).toHaveLength(1);
+    expect(apps[0]).toMatchObject({ label: 'localhost:5173', url: 'http://localhost:5173' });
+  });
+
   it('errors when not registered', () => {
     const db = buildDb();
     const tools = captureTools({
@@ -139,6 +152,67 @@ describe('hub_set_url', () => {
     expect(result.content[0].text).toContain('http://');
 
     expect(instancesRepo.byCwd(db, '/alpha')?.app_url).toBeNull();
+  });
+});
+
+describe('hub_set_apps', () => {
+  it('replaces the caller\'s app list with web (url) and desktop (no url) entries', () => {
+    const db = buildDb();
+    const instance = instancesRepo.upsert(db, { name: 'alpha', cwd: '/alpha', now: Date.now() });
+
+    const tools = captureTools(buildCtx(db));
+    const result = tools.get('hub_set_apps')!({
+      apps: [
+        { label: 'localhost:5173', url: 'http://localhost:5173' },
+        { label: 'desktop app' },
+      ],
+    }) as { content: { text: string }[] };
+    expect(JSON.parse(result.content[0].text).ok).toBe(true);
+
+    const apps = instanceAppsRepo.listForInstance(db, instance.id);
+    expect(apps).toHaveLength(2);
+    expect(apps.find((a) => a.label === 'desktop app')?.url).toBeNull();
+    expect(apps.find((a) => a.label === 'localhost:5173')?.url).toBe('http://localhost:5173');
+  });
+
+  it('an empty array clears the caller\'s app list', () => {
+    const db = buildDb();
+    const instance = instancesRepo.upsert(db, { name: 'alpha', cwd: '/alpha', now: Date.now() });
+    instanceAppsRepo.upsert(db, instance.id, 'old', 'http://old', Date.now());
+
+    const tools = captureTools(buildCtx(db));
+    tools.get('hub_set_apps')!({ apps: [] });
+
+    expect(instanceAppsRepo.listForInstance(db, instance.id)).toEqual([]);
+  });
+
+  it('rejects a non-http(s) url without touching the stored list', () => {
+    const db = buildDb();
+    const instance = instancesRepo.upsert(db, { name: 'alpha', cwd: '/alpha', now: Date.now() });
+
+    const tools = captureTools(buildCtx(db));
+    const result = tools.get('hub_set_apps')!({ apps: [{ label: 'bad', url: 'javascript:alert(1)' }] }) as {
+      isError?: boolean;
+      content: { text: string }[];
+    };
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toContain('http://');
+    expect(instanceAppsRepo.listForInstance(db, instance.id)).toEqual([]);
+  });
+
+  it('errors when not registered', () => {
+    const db = buildDb();
+    const tools = captureTools({
+      db,
+      bus: new HubBus(),
+      log: silentLogger(),
+      athen: createAthen({ db, log: silentLogger() }),
+      getIdentity: () => undefined,
+      bind: () => {},
+    });
+
+    const result = tools.get('hub_set_apps')!({ apps: [] }) as { isError?: boolean };
+    expect(result.isError).toBe(true);
   });
 });
 
