@@ -97,6 +97,51 @@ describe('chat_send', () => {
   });
 });
 
+describe('hub_set_url', () => {
+  it('persists a valid http(s) url onto the caller\'s instance', () => {
+    const db = buildDb();
+    instancesRepo.upsert(db, { name: 'alpha', cwd: '/alpha', now: Date.now() });
+
+    const tools = captureTools(buildCtx(db));
+    const result = tools.get('hub_set_url')!({ url: 'http://localhost:5173' }) as { content: { text: string }[] };
+    expect(JSON.parse(result.content[0].text)).toEqual({ ok: true, url: 'http://localhost:5173' });
+
+    const instance = instancesRepo.byCwd(db, '/alpha');
+    expect(instance?.app_url).toBe('http://localhost:5173');
+    expect(instance?.app_url_at).toEqual(expect.any(Number));
+  });
+
+  it('errors when not registered', () => {
+    const db = buildDb();
+    const tools = captureTools({
+      db,
+      bus: new HubBus(),
+      log: silentLogger(),
+      athen: createAthen({ db, log: silentLogger() }),
+      getIdentity: () => undefined,
+      bind: () => {},
+    });
+
+    const result = tools.get('hub_set_url')!({ url: 'http://localhost:5173' }) as { isError?: boolean };
+    expect(result.isError).toBe(true);
+  });
+
+  it('rejects a non-http(s) url', () => {
+    const db = buildDb();
+    instancesRepo.upsert(db, { name: 'alpha', cwd: '/alpha', now: Date.now() });
+
+    const tools = captureTools(buildCtx(db));
+    const result = tools.get('hub_set_url')!({ url: 'javascript:alert(1)' }) as {
+      isError?: boolean;
+      content: { text: string }[];
+    };
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toContain('http://');
+
+    expect(instancesRepo.byCwd(db, '/alpha')?.app_url).toBeNull();
+  });
+});
+
 describe('athen tools', () => {
   it('registers athen_save/athen_search/athen_get and no kb_* names', () => {
     const tools = captureTools(buildCtx(buildDb()));

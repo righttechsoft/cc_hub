@@ -57,5 +57,20 @@ export function upsert(
     alias: null,
     first_seen_at: now,
     last_seen_at: now,
+    app_url: null,
+    app_url_at: null,
   };
+}
+
+export function setAppUrl(db: Database.Database, id: number, url: string, now: number): void {
+  stmt(db, 'UPDATE instances SET app_url = ?, app_url_at = ? WHERE id = ?').run(url, now, id);
+}
+
+// Instances that have told the hub a URL, most recently updated first — feeds the admin page's
+// persistent footer (see src/http/adminUi.ts's renderInstanceUrls).
+export function listWithAppUrl(db: Database.Database): InstanceRow[] {
+  return stmt(
+    db,
+    'SELECT * FROM instances WHERE app_url IS NOT NULL ORDER BY app_url_at DESC'
+  ).all() as InstanceRow[];
 }

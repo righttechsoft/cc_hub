@@ -24,6 +24,11 @@ export interface HubToolsContext {
 
 const NOT_REGISTERED_TEXT = 'Not registered — call hub_register with your cwd first.';
 
+// Mirrors app.ts's NOTICE_TEXT_MAX_CHARS cap on the automatically-captured path, so a URL set
+// explicitly via this tool and one captured from cc-attach's output-trigger notice share a limit.
+const APP_URL_MAX_LENGTH = 300;
+const HTTP_URL_RE = /^https?:\/\//i;
+
 // A session is still considered "active" for chat_peers if it's idle but had activity within
 // this window — mirrors the limit watcher's own recency heuristic for interrupted candidates.
 const PEER_RECENCY_MS = 5 * 60 * 1000;
@@ -208,6 +213,41 @@ export function registerHubTools(server: McpServer, ctx: HubToolsContext): void 
       });
 
       return jsonResult({ peers });
+    }
+  );
+
+  server.registerTool(
+    'hub_set_url',
+    {
+      description:
+        "Tell the hub the URL of the app/dev server this instance is running — it's shown in the hub's admin " +
+        'UI. Call it whenever you start or change a local server (e.g. after `npm run dev` prints ' +
+        '"Local: http://localhost:5173/"). Requires hub_register to have been called first this session.',
+      inputSchema: {
+        url: z
+          .string()
+          .min(1)
+          .max(APP_URL_MAX_LENGTH)
+          .describe('Full URL of the running app/dev server, e.g. http://localhost:5173'),
+      },
+    },
+    (args) => {
+      const identity = ctx.getIdentity();
+      if (!identity) return notRegistered();
+
+      if (!HTTP_URL_RE.test(args.url)) {
+        return {
+          isError: true as const,
+          content: [{ type: 'text' as const, text: 'url must start with http:// or https://' }],
+        };
+      }
+
+      const instance = instances.byCwd(ctx.db, identity.cwd);
+      if (!instance) return notRegistered();
+
+      instances.setAppUrl(ctx.db, instance.id, args.url, Date.now());
+
+      return jsonResult({ ok: true, url: args.url });
     }
   );
 

@@ -2,13 +2,14 @@ import { describe, expect, it } from 'vitest';
 import {
   esc,
   renderErrorFragment,
+  renderInstanceUrls,
   renderKbEditorEmpty,
   renderKbForm,
   renderKbList,
   renderKbSearchResults,
   renderMessagesList,
 } from './adminUi.js';
-import type { KbNoteRow, KbSearchResult, MessageRow } from '../types.js';
+import type { InstanceRow, KbNoteRow, KbSearchResult, MessageRow } from '../types.js';
 
 function note(overrides: Partial<KbNoteRow> = {}): KbNoteRow {
   return {
@@ -130,6 +131,46 @@ describe('renderKbEditorEmpty / renderErrorFragment', () => {
 
   it('escapes the error message', () => {
     expect(renderErrorFragment('<script>x</script>')).toContain('&lt;script&gt;x&lt;/script&gt;');
+  });
+});
+
+function instance(overrides: Partial<InstanceRow> = {}): InstanceRow {
+  return {
+    id: 1,
+    name: 'alpha',
+    cwd: '/alpha',
+    alias: null,
+    first_seen_at: 1000,
+    last_seen_at: 1000,
+    app_url: 'http://localhost:5173',
+    app_url_at: 2000,
+    ...overrides,
+  };
+}
+
+describe('renderInstanceUrls', () => {
+  it('renders a link with the instance name and URL', () => {
+    const html = renderInstanceUrls([instance()]);
+    expect(html).toContain('href="http://localhost:5173"');
+    expect(html).toContain('http://localhost:5173');
+    expect(html).toContain('alpha');
+    expect(html).toContain('target="_blank"');
+  });
+
+  it('escapes a hostile instance name', () => {
+    const html = renderInstanceUrls([instance({ name: '<script>alert(1)</script>' })]);
+    expect(html).not.toContain('<script>alert(1)</script>');
+    expect(html).toContain('&lt;script&gt;alert(1)&lt;/script&gt;');
+  });
+
+  it('renders a non-http(s) url as plain text, without an anchor', () => {
+    const html = renderInstanceUrls([instance({ app_url: 'javascript:alert(1)' })]);
+    expect(html).not.toContain('<a ');
+    expect(html).toContain('javascript:alert(1)');
+  });
+
+  it('returns an empty string when there are no instances', () => {
+    expect(renderInstanceUrls([])).toBe('');
   });
 });
 

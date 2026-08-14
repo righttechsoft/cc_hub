@@ -160,6 +160,13 @@ const MIGRATIONS: Migration[] = [
     version: 4,
     sql: 'ALTER TABLE messages ADD COLUMN summary TEXT',
   },
+  {
+    version: 5,
+    sql: `
+      ALTER TABLE instances ADD COLUMN app_url TEXT;
+      ALTER TABLE instances ADD COLUMN app_url_at INTEGER;
+    `,
+  },
 ];
 
 export function runMigrations(db: Database.Database): void {

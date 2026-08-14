@@ -8,6 +8,7 @@ import { timingSafeEqual } from 'node:crypto';
 import type Database from 'better-sqlite3';
 import type { HubConfig, IAttachRegistry, IPromptDelivery, ILimitWatcher, Logger } from '../types.js';
 import type { HubBus } from '../core/bus.js';
+import * as instancesRepo from '../db/repo/instances.js';
 import { WsHub } from './wsHub.js';
 import { ADMIN_HTML } from './adminUi.js';
 
@@ -174,7 +175,23 @@ export function buildApp(deps: BuildAppDeps): BuiltApp {
 
           if (parsed.t === 'notice' && typeof parsed.kind === 'string' && typeof parsed.text === 'string') {
             if (registeredCwd && NOTICE_KINDS.has(parsed.kind)) {
-              bus.emit({ type: 'attach_notice', cwd: registeredCwd, kind: parsed.kind, text: parsed.text.slice(0, NOTICE_TEXT_MAX_CHARS) });
+              const text = parsed.text.slice(0, NOTICE_TEXT_MAX_CHARS);
+              bus.emit({ type: 'attach_notice', cwd: registeredCwd, kind: parsed.kind, text });
+
+              // Automatic capture: a 'url' notice IS the dev-server URL (see outputScanner.ts) —
+              // persist it onto the instance for the admin footer. Best-effort: a persistence
+              // failure must not break the /attach WS handler.
+              if (parsed.kind === 'url') {
+                try {
+                  const instance = instancesRepo.byCwd(db, registeredCwd);
+                  if (instance) instancesRepo.setAppUrl(db, instance.id, text, Date.now());
+                } catch (err) {
+                  log.warn('attach: failed to persist app url', {
+                    cwd: registeredCwd,
+                    error: err instanceof Error ? err.message : String(err),
+                  });
+                }
+              }
             }
           }
         },

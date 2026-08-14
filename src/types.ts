@@ -108,6 +108,11 @@ export interface InstanceRow {
   alias: string | null;
   first_seen_at: number;
   last_seen_at: number;
+  // Last URL the instance told the hub it's serving (via the hub_set_url MCP tool, or captured
+  // automatically from cc-attach's `kind: 'url'` output-trigger notice) — see src/http/adminUi.ts's
+  // renderInstanceUrls for where it's shown.
+  app_url: string | null;
+  app_url_at: number | null;
 }
 
 export interface SessionRow {

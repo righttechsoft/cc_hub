@@ -6,6 +6,7 @@ import Database from 'better-sqlite3';
 import { runMigrations } from '../db/migrations.js';
 import { buildApiRoutes } from './apiRoutes.js';
 import { createAthen } from '../kb/athen.js';
+import * as instancesRepo from '../db/repo/instances.js';
 import * as pushTokensRepo from '../db/repo/pushTokens.js';
 import type { AttachedClient, HubConfig, IAttachRegistry, IClaudeRunner, IPromptDelivery, Logger, RunResult } from '../types.js';
 import { HubBus } from '../core/bus.js';
@@ -578,6 +579,20 @@ describe('Admin fragment routes (htmx)', () => {
     expect((html.match(/card-a/g) || []).length).toBe(1);
     expect(html).toContain('&lt;script&gt;alert(1)&lt;/script&gt;');
     expect(html).not.toContain('<script>alert(1)</script>');
+  });
+
+  it('GET /admin/instance-urls renders a link for an instance with a saved app_url', async () => {
+    const runner = fakeRunner();
+    const { app, db } = buildApp(runner);
+    insertSession(db, 'sess-url-1', null); // seeds an instance at cwd '/proj-sess-url-1'
+    const inst = db.prepare('SELECT id FROM instances WHERE cwd = ?').get('/proj-sess-url-1') as { id: number };
+    instancesRepo.setAppUrl(db, inst.id, 'http://localhost:5173', Date.now());
+
+    const res = await app.request('/admin/instance-urls');
+    expect(res.status).toBe(200);
+    const html = await res.text();
+    expect(html).toContain('href="http://localhost:5173"');
+    expect(html).toContain('inst-sess-url-1');
   });
 
   it('GET /admin/messages-list renders messages, escaping a hostile body', async () => {

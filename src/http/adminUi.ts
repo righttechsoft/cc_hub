@@ -16,7 +16,7 @@
 // monospace for ids/tags/timestamps. Signature detail: note rows read as book spines — a thin
 // brass rule on the left edge that brightens on hover/selection. Tokens live in :root below;
 // change the palette there, not inline.
-import type { KbNoteRow, KbSearchResult, MessageRow } from '../types.js';
+import type { InstanceRow, KbNoteRow, KbSearchResult, MessageRow } from '../types.js';
 
 const ESCAPE_MAP: Record<string, string> = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' };
 
@@ -221,6 +221,29 @@ export function renderSessionsList(sessions: SessionListItem[]): string {
     .join('');
 }
 
+// --- Instance app-URL footer ---
+
+const HTTP_URL_RE = /^https?:\/\//i;
+
+// Rows are already filtered to app_url IS NOT NULL + ordered by instancesRepo.listWithAppUrl.
+// Renders the footer bar's *contents* only (a flex-wrap parent lives in the page shell below) —
+// an empty list collapses to '', so the footer bar reads as empty rather than showing stale markup.
+export function renderInstanceUrls(instances: InstanceRow[]): string {
+  if (instances.length === 0) return '';
+  return instances
+    .map((inst) => {
+      const name = `<span class="mono" style="color:var(--muted)">${esc(inst.name)}</span>`;
+      const raw = inst.app_url ?? '';
+      // Defense in depth against a hand-inserted DB row: only emit an anchor for a value that
+      // still passes the http(s) check at render time, else show it as inert text.
+      const url = HTTP_URL_RE.test(raw)
+        ? `<a class="link-brass" href="${esc(raw)}" target="_blank" rel="noopener noreferrer">${esc(raw)}</a>`
+        : `<span>${esc(raw)}</span>`;
+      return `<span class="flex items-center gap-1.5">${name} ${url}</span>`;
+    })
+    .join('');
+}
+
 // --- Page shell ---
 // CDN versions pinned as of writing (all fetched and confirmed live): htmx.org 2.0.10,
 // alpinejs 3.15.12, flyonui 2.4.1 (ships flat as flyonui.css/flyonui.js, no dist/ subpath),
@@ -255,7 +278,8 @@ export const ADMIN_HTML = `<!doctype html>
   }
   [x-cloak] { display: none !important; }
   html { background: var(--ink); }
-  body { background: var(--ink); color: var(--text); font-family: ui-sans-serif, system-ui, 'Segoe UI', sans-serif; }
+  body { background: var(--ink); color: var(--text); font-family: ui-sans-serif, system-ui, 'Segoe UI', sans-serif;
+    padding-bottom: 3.25rem; /* clears the sticky instance-urls footer */ }
   .serif { font-family: Georgia, Cambria, 'Times New Roman', serif; }
   .mono { font-family: ui-monospace, Consolas, 'Cascadia Mono', monospace; }
 
@@ -309,6 +333,9 @@ export const ADMIN_HTML = `<!doctype html>
     color: var(--muted); border-bottom: 2px solid transparent; transition: color 0.15s; }
   .tab-a:hover { color: var(--text); }
   .tab-a.tab-on { color: var(--text); border-bottom-color: var(--brass); }
+
+  .link-brass { color: var(--brass); text-decoration: none; }
+  .link-brass:hover { text-decoration: underline; }
 </style>
 </head>
 <body class="min-h-screen" x-data="{ tab: 'athen' }">
@@ -386,6 +413,12 @@ export const ADMIN_HTML = `<!doctype html>
   </section>
 
 </main>
+
+<footer style="position:sticky; bottom:0; background:var(--panel); border-top:1px solid var(--line)">
+  <div class="max-w-6xl mx-auto px-6 py-2 flex flex-wrap gap-x-5 gap-y-1 items-center text-xs"
+       id="instance-urls" hx-get="/api/v1/admin/instance-urls" hx-trigger="load, every 15s" hx-swap="innerHTML">
+  </div>
+</footer>
 
 <script>
   document.body.addEventListener('htmx:configRequest', function (evt) {
