@@ -62,6 +62,16 @@ function buildConfig(opts?: {
     summaries: { enabled: true, model: 'claude-haiku-4-5' },
     attach: { enabled: true, heartbeatMs: 30000, redactSecrets: true, fenceCodePastes: false },
     athen: { embeddings: false, model: 'Xenova/all-MiniLM-L6-v2' },
+    overlord: { enabled: true, model: 'claude-haiku-4-5', transcriptDays: 30, tailKb: 256 },
+    terminalSpawn: {
+      enabled: true,
+      command: 'wt.exe',
+      args: ['-w', '0', 'new-tab', '--title', '{title}', '--startingDirectory', '{cwd}', 'cmd', '/k', '{launcher}', '--name', '{name}'],
+      maxPerHour: 6,
+      waitForRegisterMs: 60_000,
+      readyQuietMs: 1200,
+      confirmWorkingMs: 15000,
+    },
     notifications: {
       enabled: false,
       permissionRequests: true,
@@ -78,6 +88,7 @@ function buildConfig(opts?: {
       awayThresholdMinutes: 3,
       apns: { keyPath: '', keyId: '', teamId: '', bundleId: 'com.righttechsoft.ccHubMobile', environment: 'production' },
     },
+    sessions: { reapIntervalMs: 600000, staleAfterMinutes: 240, adoptSessionName: true },
     logLevel: 'info',
   };
 }
@@ -446,6 +457,35 @@ describe('startLimitWatcher state machine', () => {
     expect(continuation.calls).toHaveLength(0);
     expect(sessionStatus(db, 'sess-6')).toBe('idle');
   });
+
+  it('stays ok when parseUsage reports pct 1 (1%, just after a reset) at the default 100 threshold', async () => {
+    const db = buildDb();
+    const bus = new HubBus();
+    const events: HubEvent[] = [];
+    bus.on((e) => events.push(e));
+
+    const continuation = new FakeContinuation();
+    const clock = makeClock(6_000_000);
+
+    // config default limitedThresholdPct is 95 in buildConfig(); use the real endpoint's
+    // default of 100 to match the spec's regression scenario exactly.
+    const config = buildConfig({ limitWatcher: { limitedThresholdPct: 100 } });
+    const fetchUsage = vi.fn().mockResolvedValueOnce(parseUsage({ five_hour: { utilization: 1 } }));
+
+    const watcher = startWatcher(db, config, bus, continuation, {
+      now: clock.now,
+      readAccessToken: () => 'token',
+      fetchUsage,
+    });
+
+    await watcher._tick();
+
+    expect(limitStateRow(db).state).toBe('ok');
+    const limitedEvents = events.filter(
+      (e): e is Extract<HubEvent, { type: 'limit_state' }> => e.type === 'limit_state' && e.state.state === 'limited'
+    );
+    expect(limitedEvents).toHaveLength(0);
+  });
 });
 
 describe('ContinuationRunner', () => {
@@ -562,6 +602,37 @@ describe('parseUsage', () => {
   it('coerces a numeric-string percentage', () => {
     const usage = parseUsage({ five_hour: { percentage: '97.5' } });
     expect(usage.pct).toBeCloseTo(97.5);
+  });
+
+  // THE regression case: the live endpoint returns five_hour.utilization as an integer percent
+  // (0-100). A reading of exactly 1 means 1% (routine right after a 5h window reset) and must
+  // NOT be scaled up to 100 — the old `<= 1 -> *100` heuristic did exactly that, causing false
+  // "limit reached" episodes moments after every window reset.
+  it('does not scale a reading of exactly 1 (1%, not a fraction)', () => {
+    const usage = parseUsage({ five_hour: { utilization: 1 } });
+    expect(usage.pct).toBe(1);
+  });
+
+  it('treats other small integer percentages as already-scaled', () => {
+    expect(parseUsage({ five_hour: { utilization: 7 } }).pct).toBe(7);
+    expect(parseUsage({ five_hour: { utilization: 2 } }).pct).toBe(2);
+    expect(parseUsage({ five_hour: { utilization: 3 } }).pct).toBe(3);
+  });
+
+  it('scales a strict fraction (0.07) up to a percentage', () => {
+    expect(parseUsage({ five_hour: { utilization: 0.07 } }).pct).toBeCloseTo(7);
+  });
+
+  it('scales 0.5 up to 50', () => {
+    expect(parseUsage({ five_hour: { utilization: 0.5 } }).pct).toBe(50);
+  });
+
+  it('leaves 0 unscaled', () => {
+    expect(parseUsage({ five_hour: { utilization: 0 } }).pct).toBe(0);
+  });
+
+  it('leaves 100 unscaled', () => {
+    expect(parseUsage({ five_hour: { utilization: 100 } }).pct).toBe(100);
   });
 
   it('throws a parse UsageError when five_hour is missing', () => {

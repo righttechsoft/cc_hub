@@ -17,6 +17,8 @@
 // brass rule on the left edge that brightens on hover/selection. Tokens live in :root below;
 // change the palette there, not inline.
 import type { InstanceAppJoined, KbNoteRow, KbSearchResult, MessageRow } from '../types.js';
+import type { OverlordAskTarget, OverlordCandidate, OverlordDispatchResult, OverlordFindResult } from '../overlord/overlord.js';
+import type { DispatchCandidate, DispatchVia } from '../spawn/dispatcher.js';
 
 const ESCAPE_MAP: Record<string, string> = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' };
 
@@ -187,6 +189,7 @@ const SESSION_DOT_COLOR: Record<string, string> = {
 
 export interface SessionListItem {
   id: string;
+  instance_id: number;
   instance_name: string | null;
   cwd: string;
   status: string;
@@ -194,31 +197,322 @@ export interface SessionListItem {
   last_prompt: string | null;
   attached: boolean;
   working: boolean;
+  // What Claude Code's own `/name <x>` (or its auto-generated title) currently shows for this
+  // session — see CLAUDE.md's "Session names" subsection. Additional context alongside the
+  // instance name, not a replacement for it (a session's title can drift from the instance's
+  // adopted identity, e.g. after `/name` is used again mid-conversation).
+  session_name: string | null;
 }
 
+// One cc-attach wrapper per cwd means at most ONE session there can be "the" live terminal —
+// the one with the newest activity. Older not-yet-ended rows in the same cwd (e.g. a session
+// whose terminal was closed without a SessionEnd hook) must not inherit the cwd's attach flags.
+export function newestSessionPerCwd(sessions: Pick<SessionListItem, 'id' | 'cwd' | 'last_event_at'>[]): Set<string> {
+  const newest = new Map<string, { id: string; at: number }>();
+  for (const s of sessions) {
+    const cur = newest.get(s.cwd);
+    if (!cur || (s.last_event_at ?? 0) > cur.at) newest.set(s.cwd, { id: s.id, at: s.last_event_at ?? 0 });
+  }
+  return new Set([...newest.values()].map((v) => v.id));
+}
+
+// Inline rename affordance (Alpine toggle, same pattern as the KB/message delete-confirm
+// widgets): a quiet pencil button swaps in a name input + Save/Cancel, hx-post to the rename
+// route, targeting the whole sessions list for refresh (see apiRoutes.ts's
+// POST /admin/instances/rename). Renaming a running instance takes effect immediately for
+// chat/attach routing; only a NAMED terminal's own CC_HUB_NAME env is unaffected until relaunch.
+function renameWidget(s: SessionListItem): string {
+  const displayName = esc(s.instance_name ?? s.id.slice(0, 8));
+  return `<span x-data="{ renaming: false }" class="inline-flex items-center gap-1.5">
+    <span x-show="!renaming" class="inline-flex items-center gap-1">
+      <span class="font-semibold text-sm">${displayName}</span>
+      <button type="button" class="btn-a btn-quiet btn-xs" title="Rename instance" @click="renaming = true">&#9998;</button>
+    </span>
+    <form x-show="renaming" hx-post="/api/v1/admin/instances/rename" hx-target="#sessions-list" hx-swap="innerHTML"
+          class="inline-flex items-center gap-1">
+      <input type="hidden" name="id" value="${s.instance_id}" />
+      <input type="text" name="newName" value="${esc(s.instance_name ?? '')}" maxlength="40"
+             class="input-a mono !text-xs !py-1 !px-1.5 !w-32" autocomplete="off" />
+      <button type="submit" class="btn-a btn-brass btn-xs">Save</button>
+      <button type="button" class="btn-a btn-quiet btn-xs" @click="renaming = false">Cancel</button>
+    </form>
+  </span>`;
+}
+
+const SESSION_NAME_DISPLAY_MAX_CHARS = 60;
+
+function sessionCard(s: SessionListItem): string {
+  const dot = SESSION_DOT_COLOR[s.status] ?? 'var(--muted)';
+  const live = s.attached ? '<span class="badge-brass">LIVE</span>' : '';
+  const working = s.working ? '<span class="badge-brass" title="claude is working">&#9889;</span>' : '';
+  const prompt = s.last_prompt
+    ? `<div class="snippet mt-1">${esc(s.last_prompt)}</div>`
+    : '';
+  const sessionName = s.session_name
+    ? `<div class="meta-line">${esc(
+        s.session_name.length > SESSION_NAME_DISPLAY_MAX_CHARS
+          ? s.session_name.slice(0, SESSION_NAME_DISPLAY_MAX_CHARS - 1).trimEnd() + '…'
+          : s.session_name
+      )}</div>`
+    : '';
+  return `<div class="card-a p-3 mb-2">
+    <div class="flex items-center gap-2 flex-wrap">
+      <span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:${dot}"></span>
+      ${renameWidget(s)}
+      <span class="meta-line !mt-0">${esc(s.status)}</span>
+      ${live} ${working}
+      <span class="meta-line !mt-0 ml-auto">${esc(relTime(s.last_event_at))}</span>
+    </div>
+    <div class="meta-line">${esc(s.cwd)} &middot; ${esc(s.id.slice(0, 8))}</div>
+    ${sessionName}
+    ${prompt}
+  </div>`;
+}
+
+// Attached-terminal sessions group first (latest activity on top) — those are the ones a human
+// is actually sitting in. Non-attached sessions follow, also newest activity first. Group labels
+// carry a shared `group-label` class (alongside their existing classes) so the client-side
+// sessions filter script can find and hide them when their whole group is filtered out.
 export function renderSessionsList(sessions: SessionListItem[]): string {
   if (sessions.length === 0) return '<p class="empty-note">No live sessions.</p>';
-  return sessions
-    .map((s) => {
-      const dot = SESSION_DOT_COLOR[s.status] ?? 'var(--muted)';
-      const live = s.attached ? '<span class="badge-brass">LIVE</span>' : '';
-      const working = s.working ? '<span class="badge-brass" title="claude is working">&#9889;</span>' : '';
-      const prompt = s.last_prompt
-        ? `<div class="snippet mt-1">${esc(s.last_prompt)}</div>`
-        : '';
-      return `<div class="card-a p-3 mb-2">
-        <div class="flex items-center gap-2 flex-wrap">
-          <span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:${dot}"></span>
-          <span class="font-semibold text-sm">${esc(s.instance_name ?? s.id.slice(0, 8))}</span>
-          <span class="meta-line !mt-0">${esc(s.status)}</span>
-          ${live} ${working}
-          <span class="meta-line !mt-0 ml-auto">${esc(relTime(s.last_event_at))}</span>
-        </div>
-        <div class="meta-line">${esc(s.cwd)} &middot; ${esc(s.id.slice(0, 8))}</div>
-        ${prompt}
-      </div>`;
-    })
+
+  const byActivity = (a: SessionListItem, b: SessionListItem) => (b.last_event_at ?? 0) - (a.last_event_at ?? 0);
+  const open = sessions.filter((s) => s.attached).sort(byActivity);
+  const rest = sessions.filter((s) => !s.attached).sort(byActivity);
+
+  if (open.length > 0 && rest.length > 0) {
+    return (
+      '<p class="meta-line mb-1 group-label">Open terminals</p>' +
+      open.map(sessionCard).join('') +
+      '<p class="meta-line mt-3 mb-1 group-label">Other sessions</p>' +
+      rest.map(sessionCard).join('')
+    );
+  }
+  return open.map(sessionCard).join('') + rest.map(sessionCard).join('');
+}
+
+// --- AI Overlord fragment ---
+
+function overlordCandidateCard(c: OverlordCandidate, index: number): string {
+  const dot = SESSION_DOT_COLOR[c.status] ?? 'var(--muted)';
+  const snippetsHtml = c.snippets
+    .slice(0, 2)
+    .map((s) => `<div class="snippet mt-1">${esc(s)}</div>`)
     .join('');
+  const resumeCmd = `cd "${c.cwd}"; cc-attach --resume ${c.sessionId}`;
+  return `<div class="card-a p-3 mb-2">
+    <div class="flex items-center gap-2 flex-wrap">
+      <span class="badge-brass">[${index}]</span>
+      <span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:${dot}"></span>
+      <span class="font-semibold text-sm">${esc(c.instance_name ?? c.sessionId.slice(0, 8))}</span>
+      <span class="meta-line !mt-0">${esc(c.status)}</span>
+      <span class="meta-line !mt-0 ml-auto">${esc(relTime(c.last_event_at))}</span>
+    </div>
+    <div class="meta-line">${esc(c.cwd || 'unknown')} &middot; ${esc(c.sessionId.slice(0, 8))}</div>
+    <div class="flex items-center gap-2 mt-1">
+      <code class="snippet !mt-0" style="user-select:all">${esc(resumeCmd)}</code>
+      <button type="button" class="btn-a btn-quiet" onclick="copyText(this)" data-copy="${esc(resumeCmd)}">Copy</button>
+    </div>
+    ${snippetsHtml}
+  </div>`;
+}
+
+// The AI cites sources inline as [n] (1-based, matching the numbered candidate list sent in the
+// prompt). Ordered, deduped, out-of-range indexes dropped.
+function parseCitedIndexes(answer: string, candidateCount: number): number[] {
+  const seen = new Set<number>();
+  const ordered: number[] = [];
+  for (const m of answer.matchAll(/\[(\d+)\]/g)) {
+    const n = Number(m[1]);
+    if (n >= 1 && n <= candidateCount && !seen.has(n)) {
+      seen.add(n);
+      ordered.push(n);
+    }
+  }
+  return ordered;
+}
+
+// Answer text esc'd (never trusted as markup) then reflowed into paragraphs on blank lines, single
+// newlines within a paragraph become <br>. Candidate sessions render below, numbered [1], [2]... to
+// match the answer's own [n] references, reusing the sessions tab's card visual language.
+// Candidates render in recency order but the AI's citations are what actually matters — a
+// deterministic reorder puts cited matches on top (in citation order) while every card keeps its
+// original [n] label, so the answer text stays coherent; leftover uncited candidates collapse into
+// a <details> disclosure instead of burying the real match under recency noise.
+export function renderOverlordAnswer(result: OverlordFindResult): string {
+  const paragraphs = esc(result.answer)
+    .split(/\n{2,}/)
+    .map((p) => p.trim())
+    .filter((p) => p.length > 0)
+    .map((p) => `<p class="mb-2 leading-relaxed">${p.replace(/\n/g, '<br>')}</p>`)
+    .join('');
+  const answerHtml = `<div class="card-a p-4 mb-4">${paragraphs || '<p class="empty-note">No answer.</p>'}</div>`;
+
+  if (result.candidates.length === 0) return answerHtml;
+
+  const cited = parseCitedIndexes(result.answer, result.candidates.length);
+  if (cited.length === 0) {
+    return answerHtml + result.candidates.map((c, i) => overlordCandidateCard(c, i + 1)).join('');
+  }
+
+  const citedSet = new Set(cited);
+  const citedHtml = cited.map((n) => overlordCandidateCard(result.candidates[n - 1], n)).join('');
+  const uncited = result.candidates.map((_, i) => i + 1).filter((n) => !citedSet.has(n));
+  const uncitedHtml =
+    uncited.length === 0
+      ? ''
+      : `<details class="mt-3"><summary class="meta-line" style="cursor:pointer">Other candidates (${uncited.length})</summary>${uncited
+          .map((n) => overlordCandidateCard(result.candidates[n - 1], n))
+          .join('')}</details>`;
+
+  return answerHtml + citedHtml + uncitedHtml;
+}
+
+// --- AI Overlord: ask mode (confirm -> send -> replies) ---
+
+// Ask mode never sends on the first ask — this renders the confirmation step: the (esc'd) message
+// that would be sent, the resolved target list, and a form that only fires POST overlord-send when
+// the human clicks Send. One hidden <input name="targets"> per target lets apiRoutes.ts read them
+// back as an array via parseBody({ all: true }). Cancel just clears the answer div in place — no
+// route needed, nothing was sent yet.
+// Non-live scope matches skipped by default (see resolveAskTargets/partitionAskTargets in
+// overlord.ts) — a muted hint line, never blocking: it tells the human how to widen the net
+// ("including inactive") rather than silently dropping matches from view.
+function renderOverlordExcluded(excluded: OverlordAskTarget[]): string {
+  if (excluded.length === 0) return '';
+  const names = excluded.map((t) => esc(t.name)).join(', ');
+  return `<p class="meta-line mb-2">Skipped ${excluded.length} inactive instance(s): ${names} &mdash; say "including inactive" to reach them (each gets a fresh headless session).</p>`;
+}
+
+export function renderOverlordConfirm(
+  message: string,
+  targets: OverlordAskTarget[],
+  excluded: OverlordAskTarget[] = []
+): string {
+  if (targets.length === 0) {
+    if (excluded.length === 0) {
+      return renderErrorFragment('No known instances match that scope — nothing to send to.');
+    }
+    // Every scope match exists but none is currently live — no Send button; there is nothing to
+    // send to without explicitly opting into a headless spawn via "including inactive".
+    return `<div class="card-a p-4 mb-3">
+      <p class="meta-line !mt-0 mb-2">No matching instance is currently active — nothing was sent.</p>
+      ${renderOverlordExcluded(excluded)}
+    </div>`;
+  }
+
+  const targetRows = targets
+    .map(
+      (t) =>
+        `<li class="flex items-baseline gap-2"><span class="peer">${esc(t.name)}</span><span class="meta-line !mt-0">${esc(t.cwd)}</span></li>`
+    )
+    .join('');
+  const hiddenTargets = targets.map((t) => `<input type="hidden" name="targets" value="${esc(t.name)}" />`).join('');
+
+  return `<div class="card-a p-4 mb-3">
+    <p class="meta-line mb-2">Overlord will send this message directly to ${targets.length} instance(s):</p>
+    <div class="snippet !mt-0 mb-3" style="white-space:pre-wrap; -webkit-line-clamp:unset">${esc(message)}</div>
+    <ul class="mb-3 flex flex-col gap-1">${targetRows}</ul>
+    ${renderOverlordExcluded(excluded)}
+    <form hx-post="/api/v1/admin/overlord-send" hx-target="#overlord-answer" hx-swap="innerHTML" class="flex items-center gap-2">
+      <input type="hidden" name="message" value="${esc(message)}" />
+      ${hiddenTargets}
+      <button type="submit" class="btn-a btn-brass">Send</button>
+      <button type="button" class="btn-a btn-quiet"
+        onclick="document.getElementById('overlord-answer').innerHTML = ''">Cancel</button>
+    </form>
+  </div>`;
+}
+
+// After Send: confirms who got the message, then a self-polling div that fetches
+// GET overlord-replies?afterId=<sinceId> (the message-id watermark captured right before the sends)
+// every 3s. The route response replaces this div's *contents* only (hx-target="this"), same pattern
+// as the sessions-list poll — the hx-get/hx-trigger stay on this element across polls.
+export function renderOverlordSent(targets: string[], sinceId: number): string {
+  return `<div class="card-a p-3 mb-3">
+    <p class="meta-line !mt-0">Sent to ${targets.length} instance(s): ${targets.map((t) => esc(t)).join(', ')}</p>
+  </div>
+  <div id="overlord-replies" hx-get="/api/v1/admin/overlord-replies?afterId=${sinceId}"
+       hx-trigger="load, every 3s" hx-target="this" hx-swap="innerHTML">
+    <p class="empty-note">Waiting for replies&hellip;</p>
+  </div>`;
+}
+
+// Rendered inside the polling div above — just the cards (or the empty-state note), never the
+// wrapping div itself. Replies are messages addressed to the reserved 'overlord' recipient.
+export function renderOverlordReplies(replies: MessageRow[]): string {
+  if (replies.length === 0) return '<p class="empty-note">No replies yet&hellip;</p>';
+  return replies
+    .map(
+      (m) => `<div class="card-a p-3 mb-2">
+        <div class="meta-line !mt-0"><span class="peer">${esc(m.from_name)}</span> &middot; ${esc(relTime(m.created_at))}</div>
+        <div class="whitespace-pre-wrap break-words text-sm leading-relaxed mt-1">${esc(m.body)}</div>
+      </div>`
+    )
+    .join('');
+}
+
+// --- AI Overlord: dispatch mode (confirm -> dispatch) ---
+
+function overlordDispatchCandidateRow(c: DispatchCandidate): string {
+  const state = c.working ? 'working' : c.attached ? 'idle, attached' : 'not attached';
+  return `<li class="flex items-baseline gap-2"><span class="peer">${esc(c.name)}</span><span class="meta-line !mt-0">${esc(c.cwd)}</span><span class="meta-line !mt-0">${esc(state)}</span></li>`;
+}
+
+// Dispatch mode never acts on the first ask — this renders the confirmation step: the plan in
+// plain words (reuse vs. open a new tab), the task text, the resolved candidate list (with
+// live/working state), and a form that only fires POST overlord-dispatch when the human clicks
+// Dispatch. Hidden inputs round-trip the plan's action/name/cwd/task so the dispatch route can
+// re-validate it fresh rather than trusting stale client state. Cancel just clears the answer div
+// in place — no route needed, nothing was executed yet.
+export function renderOverlordDispatchConfirm(result: OverlordDispatchResult): string {
+  const { action, task, candidates } = result;
+  const planLine =
+    action.kind === 'inject'
+      ? `Reuse the idle terminal <span class="peer">${esc(action.name)}</span> in ${esc(action.cwd)}`
+      : `Open a NEW terminal tab in ${esc(action.cwd)} as <span class="peer">${esc(action.name)}</span>`;
+  const candidateRows =
+    candidates.length > 0
+      ? `<ul class="mb-3 flex flex-col gap-1">${candidates.map(overlordDispatchCandidateRow).join('')}</ul>`
+      : '';
+
+  return `<div class="card-a p-4 mb-3">
+    <p class="meta-line mb-2">${planLine}</p>
+    <div class="snippet !mt-0 mb-3" style="white-space:pre-wrap; -webkit-line-clamp:unset">${esc(task)}</div>
+    ${candidateRows}
+    <form hx-post="/api/v1/admin/overlord-dispatch" hx-target="#overlord-answer" hx-swap="innerHTML" class="flex items-center gap-2">
+      <input type="hidden" name="action" value="${esc(action.kind)}" />
+      <input type="hidden" name="name" value="${esc(action.name)}" />
+      <input type="hidden" name="cwd" value="${esc(action.cwd)}" />
+      <input type="hidden" name="task" value="${esc(task)}" />
+      <button type="submit" class="btn-a btn-brass">Dispatch</button>
+      <button type="button" class="btn-a btn-quiet"
+        onclick="document.getElementById('overlord-answer').innerHTML = ''">Cancel</button>
+    </form>
+  </div>`;
+}
+
+// After Dispatch: one outcome line per `via`. 'spawned_no_inject' also surfaces the task in a
+// copyable snippet (reusing the copyText() button pattern from the Overlord candidate cards)
+// since a human now needs to paste it into the freshly opened tab themselves.
+export function renderOverlordDispatched(via: DispatchVia, name: string, cwd: string, task: string): string {
+  if (via === 'failed') {
+    return renderErrorFragment(`Failed to dispatch to ${name} — see hub logs.`);
+  }
+  if (via === 'injected') {
+    return `<div class="card-a p-3 mb-3"><p class="meta-line !mt-0">Task sent to <span class="peer">${esc(name)}</span>.</p></div>`;
+  }
+  if (via === 'spawned') {
+    return `<div class="card-a p-3 mb-3"><p class="meta-line !mt-0">Opened a new tab as <span class="peer">${esc(name)}</span> and sent the task.</p></div>`;
+  }
+  // spawned_no_inject
+  return `<div class="card-a p-3 mb-3">
+    <p class="meta-line !mt-0 mb-2">Opened a new tab as <span class="peer">${esc(name)}</span> in ${esc(cwd)} &mdash; it didn&#39;t register in time. Paste the task manually:</p>
+    <div class="flex items-center gap-2">
+      <code class="snippet !mt-0" style="user-select:all">${esc(task)}</code>
+      <button type="button" class="btn-a btn-quiet" onclick="copyText(this)" data-copy="${esc(task)}">Copy</button>
+    </div>
+  </div>`;
 }
 
 // --- Instance running-apps footer ---
@@ -386,6 +680,7 @@ export const ADMIN_HTML = `<!doctype html>
   <button type="button" class="tab-a" :class="tab === 'athen' ? 'tab-on' : ''" @click="tab = 'athen'">Athen</button>
   <button type="button" class="tab-a" :class="tab === 'messages' ? 'tab-on' : ''" @click="tab = 'messages'">Messages</button>
   <button type="button" class="tab-a" :class="tab === 'sessions' ? 'tab-on' : ''" @click="tab = 'sessions'">Sessions</button>
+  <button type="button" class="tab-a" :class="tab === 'overlord' ? 'tab-on' : ''" @click="tab = 'overlord'">AI Overlord</button>
 </nav>
 
 <main class="max-w-6xl mx-auto px-6 py-6">
@@ -428,9 +723,23 @@ export const ADMIN_HTML = `<!doctype html>
 
   <section x-show="tab === 'sessions'" x-cloak>
     <p class="text-xs mb-4" style="color:var(--muted)">Live Claude Code sessions across all instances. LIVE = open in a cc-attach terminal; &#9889; = claude is working right now. Refreshes every 5s.</p>
+    <input type="text" id="sessions-filter" placeholder="Filter sessions&hellip;" class="input-a max-w-xs mb-3"
+      oninput="applySessionsFilter()" autocomplete="off">
     <div class="max-w-3xl" id="sessions-list" hx-get="/api/v1/admin/sessions-list" hx-trigger="load, every 5s" hx-target="this" hx-swap="innerHTML">
       <p class="empty-note">Loading&hellip;</p>
     </div>
+  </section>
+
+  <section x-show="tab === 'overlord'" x-cloak>
+    <p class="text-xs mb-4" style="color:var(--muted)">Ask a natural-language question over past Claude Code sessions &mdash; e.g. &quot;find a session where I fixed the date bug&quot; &mdash; ask/tell the agents something (e.g. &quot;ask all wonkybox sessions what&#39;s blocking them&quot;) &mdash; or dispatch a task to a project (e.g. &quot;implement the CSV export in wonkybox2_api&quot;), reusing an idle terminal or opening a new one &mdash; you&#39;ll confirm before anything is sent, spawned, or injected.</p>
+    <form class="flex gap-2 mb-4 max-w-3xl items-center"
+          hx-post="/api/v1/admin/overlord-ask" hx-target="#overlord-answer" hx-swap="innerHTML" hx-indicator="#overlord-indicator">
+      <input type="text" id="overlord-q" name="q" maxlength="500" placeholder="Find a session where I&hellip;"
+        class="input-a flex-1" autocomplete="off" />
+      <button type="submit" class="btn-a btn-brass">Ask</button>
+      <span id="overlord-indicator" class="htmx-indicator meta-line !mt-0">Thinking&hellip;</span>
+    </form>
+    <div class="max-w-3xl" id="overlord-answer"></div>
   </section>
 
 </main>
@@ -459,6 +768,50 @@ export const ADMIN_HTML = `<!doctype html>
       evt.detail.isError = false;
     }
   });
+</script>
+
+<script>
+  // Live client-side sessions filter: matches any text on a card, instantly, and re-applies
+  // after every htmx poll swap. A group label hides when none of its cards survive the filter.
+  function applySessionsFilter() {
+    var q = (document.getElementById('sessions-filter')?.value || '').trim().toLowerCase();
+    var list = document.getElementById('sessions-list');
+    if (!list) return;
+    var children = Array.from(list.children);
+    // First pass: cards.
+    for (var el of children) {
+      if (!el.classList.contains('card-a')) continue;
+      el.style.display = !q || el.textContent.toLowerCase().includes(q) ? '' : 'none';
+    }
+    // Second pass: labels — visible iff at least one card before the next label is visible.
+    for (var i = 0; i < children.length; i++) {
+      if (!children[i].classList.contains('group-label')) continue;
+      var anyVisible = false;
+      for (var j = i + 1; j < children.length && !children[j].classList.contains('group-label'); j++) {
+        if (children[j].classList.contains('card-a') && children[j].style.display !== 'none') { anyVisible = true; break; }
+      }
+      children[i].style.display = anyVisible ? '' : 'none';
+    }
+  }
+  document.body.addEventListener('htmx:afterSwap', function (e) {
+    if (e.target && e.target.id === 'sessions-list') applySessionsFilter();
+  });
+</script>
+
+<script>
+  // Copy-to-clipboard for resume commands (Overlord candidate cards). navigator.clipboard needs a
+  // secure context; the admin page is often opened over plain http via LAN IP, hence the fallback.
+  function copyText(btn) {
+    var t = btn.getAttribute('data-copy');
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(t).then(function () { btn.textContent = 'Copied'; setTimeout(function () { btn.textContent = 'Copy'; }, 1500); }).catch(function () { fallbackCopy(t, btn); });
+    } else { fallbackCopy(t, btn); }
+  }
+  function fallbackCopy(t, btn) {
+    var ta = document.createElement('textarea'); ta.value = t; document.body.appendChild(ta); ta.select();
+    try { document.execCommand('copy'); btn.textContent = 'Copied'; setTimeout(function () { btn.textContent = 'Copy'; }, 1500); } catch (e) {}
+    document.body.removeChild(ta);
+  }
 </script>
 
 </body>

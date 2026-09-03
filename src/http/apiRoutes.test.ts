@@ -4,12 +4,14 @@ import { join } from 'node:path';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import Database from 'better-sqlite3';
 import { runMigrations } from '../db/migrations.js';
-import { buildApiRoutes } from './apiRoutes.js';
+import { buildApiRoutes, type RenameBindingSource } from './apiRoutes.js';
 import { createAthen } from '../kb/athen.js';
 import * as instanceAppsRepo from '../db/repo/instanceApps.js';
+import * as instancesRepo from '../db/repo/instances.js';
 import * as pushTokensRepo from '../db/repo/pushTokens.js';
 import type { AttachedClient, HubConfig, IAttachRegistry, IClaudeRunner, IPromptDelivery, Logger, RunResult } from '../types.js';
 import { HubBus } from '../core/bus.js';
+import type { Overlord, OverlordResult } from '../overlord/overlord.js';
 
 function buildDb(): Database.Database {
   const db = new Database(':memory:');
@@ -50,6 +52,16 @@ function buildConfig(): HubConfig {
     summaries: { enabled: true, model: 'claude-haiku-4-5' },
     attach: { enabled: true, heartbeatMs: 30_000, redactSecrets: true, fenceCodePastes: false },
     athen: { embeddings: false, model: 'Xenova/all-MiniLM-L6-v2' },
+    overlord: { enabled: true, model: 'claude-haiku-4-5', transcriptDays: 30, tailKb: 256 },
+    terminalSpawn: {
+      enabled: true,
+      command: 'wt.exe',
+      args: ['-w', '0', 'new-tab', '--title', '{title}', '--startingDirectory', '{cwd}', 'cmd', '/k', '{launcher}', '--name', '{name}'],
+      maxPerHour: 6,
+      waitForRegisterMs: 60_000,
+      readyQuietMs: 1200,
+      confirmWorkingMs: 15000,
+    },
     notifications: {
       enabled: false,
       permissionRequests: true,
@@ -66,6 +78,7 @@ function buildConfig(): HubConfig {
       awayThresholdMinutes: 3,
       apns: { keyPath: '', keyId: '', teamId: '', bundleId: 'com.righttechsoft.ccHubMobile', environment: 'production' },
     },
+    sessions: { reapIntervalMs: 600000, staleAfterMinutes: 240, adoptSessionName: true },
     logLevel: 'info',
   };
 }
@@ -100,7 +113,9 @@ function fakeRunner(opts?: { atCapacity?: boolean }): IClaudeRunner & { startNew
   };
 }
 
-function fakeAttach(opts?: { attachedCwd?: string }): IAttachRegistry & { inject: ReturnType<typeof vi.fn> } {
+function fakeAttach(
+  opts?: { attachedCwd?: string }
+): IAttachRegistry & { inject: ReturnType<typeof vi.fn>; rename: ReturnType<typeof vi.fn> } {
   const attachedCwd = opts?.attachedCwd;
   return {
     register: vi.fn(),
@@ -114,8 +129,13 @@ function fakeAttach(opts?: { attachedCwd?: string }): IAttachRegistry & { inject
     listAttached: () => (attachedCwd ? [attachedCwd] : []),
     setWorking: vi.fn(),
     isWorking: () => false,
+    rename: vi.fn(),
     stop: vi.fn(),
   };
+}
+
+function fakeGateway(): RenameBindingSource & { renameBinding: ReturnType<typeof vi.fn> } {
+  return { renameBinding: vi.fn() };
 }
 
 function insertSession(db: Database.Database, id: string, transcriptPath: string | null): void {
@@ -130,7 +150,11 @@ function insertSession(db: Database.Database, id: string, transcriptPath: string
   ).run(id, Number(info.lastInsertRowid), transcriptPath, now, now);
 }
 
-function buildApp(runner: IClaudeRunner, attach?: IAttachRegistry) {
+function buildApp(
+  runner: IClaudeRunner,
+  attach?: IAttachRegistry,
+  opts?: { overlord?: Overlord; pokeChatDelivery?: () => void; gateway?: RenameBindingSource }
+) {
   const db = buildDb();
   const bus = new HubBus();
   const log = silentLogger();
@@ -146,8 +170,19 @@ function buildApp(runner: IClaudeRunner, attach?: IAttachRegistry) {
     athen: createAthen({ db, log, embedder: undefined }),
     startedAt: Date.now(),
     attach: attach ?? fakeAttach(),
+    overlord: opts?.overlord,
+    pokeChatDelivery: opts?.pokeChatDelivery,
+    gateway: opts?.gateway,
   });
   return { app, db, log };
+}
+
+function fakeOverlord(ask: (question: string) => Promise<OverlordResult>): Overlord {
+  return {
+    ask,
+    resolveAskTargets: () => ({ targets: [], excluded: [] }),
+    resolveDispatchPlan: () => null,
+  };
 }
 
 describe('POST /sessions', () => {
@@ -581,6 +616,112 @@ describe('Admin fragment routes (htmx)', () => {
     expect(html).not.toContain('<script>alert(1)</script>');
   });
 
+  describe('POST /admin/instances/rename', () => {
+    it('renames the instance and re-keys the live attach client + MCP binding', async () => {
+      const runner = fakeRunner();
+      const attach = fakeAttach({ attachedCwd: '/proj' });
+      const gateway = fakeGateway();
+      const { app, db } = buildApp(runner, attach, { gateway });
+      insertSession(db, 'sess-rename-1', null);
+      const before = instancesRepo.byName(db, 'inst-sess-rename-1')!;
+
+      const res = await app.request('/admin/instances/rename', {
+        method: 'POST',
+        headers: { 'content-type': 'application/x-www-form-urlencoded' },
+        body: `id=${before.id}&newName=wb-sync`,
+      });
+
+      expect(res.status).toBe(200);
+      expect(instancesRepo.byId(db, before.id)?.name).toBe('wb-sync');
+      expect(instancesRepo.byName(db, 'inst-sess-rename-1')).toBeUndefined();
+      expect(attach.rename).toHaveBeenCalledWith('inst-sess-rename-1', 'wb-sync');
+      expect(gateway.renameBinding).toHaveBeenCalledWith('inst-sess-rename-1', 'wb-sync');
+
+      const html = await res.text();
+      expect(html).toContain('wb-sync'); // rebuilt sessions list reflects the new name
+    });
+
+    it('lowercases the requested name before validating/applying it', async () => {
+      const runner = fakeRunner();
+      const { app, db } = buildApp(runner);
+      insertSession(db, 'sess-rename-2', null);
+      const before = instancesRepo.byName(db, 'inst-sess-rename-2')!;
+
+      await app.request('/admin/instances/rename', {
+        method: 'POST',
+        headers: { 'content-type': 'application/x-www-form-urlencoded' },
+        body: `id=${before.id}&newName=WB-Sync`,
+      });
+
+      expect(instancesRepo.byId(db, before.id)?.name).toBe('wb-sync');
+    });
+
+    it('400s on a name that fails INSTANCE_NAME_RE, leaving the instance untouched', async () => {
+      const runner = fakeRunner();
+      const { app, db } = buildApp(runner);
+      insertSession(db, 'sess-rename-3', null);
+      const before = instancesRepo.byName(db, 'inst-sess-rename-3')!;
+
+      // Over the 40-char length cap — invalid regardless of case, no special chars to URL-encode.
+      const res = await app.request('/admin/instances/rename', {
+        method: 'POST',
+        headers: { 'content-type': 'application/x-www-form-urlencoded' },
+        body: `id=${before.id}&newName=${'a'.repeat(41)}`,
+      });
+
+      expect(res.status).toBe(400);
+      expect(instancesRepo.byId(db, before.id)?.name).toBe('inst-sess-rename-3');
+    });
+
+    it('404s for an unknown instance id', async () => {
+      const runner = fakeRunner();
+      const { app } = buildApp(runner);
+
+      const res = await app.request('/admin/instances/rename', {
+        method: 'POST',
+        headers: { 'content-type': 'application/x-www-form-urlencoded' },
+        body: 'id=999999&newName=wb-sync',
+      });
+
+      expect(res.status).toBe(404);
+    });
+
+    it('409s when the requested name is already used by a DIFFERENT instance', async () => {
+      const runner = fakeRunner();
+      const { app, db } = buildApp(runner);
+      insertSession(db, 'sess-rename-4', null);
+      insertSession(db, 'sess-rename-5', null);
+      const target = instancesRepo.byName(db, 'inst-sess-rename-4')!;
+
+      const res = await app.request('/admin/instances/rename', {
+        method: 'POST',
+        headers: { 'content-type': 'application/x-www-form-urlencoded' },
+        body: `id=${target.id}&newName=inst-sess-rename-5`,
+      });
+
+      expect(res.status).toBe(409);
+      expect(instancesRepo.byId(db, target.id)?.name).toBe('inst-sess-rename-4');
+    });
+
+    it('renaming to its own current name (case-insensitively) is a no-op success, not a collision', async () => {
+      const runner = fakeRunner();
+      const attach = fakeAttach();
+      const { app, db } = buildApp(runner, attach);
+      insertSession(db, 'sess-rename-6', null);
+      const before = instancesRepo.byName(db, 'inst-sess-rename-6')!;
+
+      const res = await app.request('/admin/instances/rename', {
+        method: 'POST',
+        headers: { 'content-type': 'application/x-www-form-urlencoded' },
+        body: `id=${before.id}&newName=inst-sess-rename-6`,
+      });
+
+      expect(res.status).toBe(200);
+      expect(instancesRepo.byId(db, before.id)?.name).toBe('inst-sess-rename-6');
+      expect(attach.rename).not.toHaveBeenCalled();
+    });
+  });
+
   it('GET /admin/instance-urls renders a link for an instance with a running app', async () => {
     const runner = fakeRunner();
     const { app, db } = buildApp(runner);
@@ -701,6 +842,128 @@ describe('Admin fragment routes (htmx)', () => {
 
     const missingRes = await app.request(`/admin/messages/${sent.message.id}`, { method: 'DELETE' });
     expect(missingRes.status).toBe(404);
+  });
+});
+
+describe('AI Overlord ask-mode routes', () => {
+  it('POST /admin/overlord-ask renders a confirmation (not a send) for an ask-mode result', async () => {
+    const runner = fakeRunner();
+    const overlord = fakeOverlord(async () => ({
+      mode: 'ask',
+      message: 'What is blocking you?',
+      targets: [{ name: 'alpha', cwd: '/proj-alpha' }],
+      excluded: [],
+    }));
+    const { app } = buildApp(runner, undefined, { overlord });
+
+    const res = await app.request('/admin/overlord-ask', {
+      method: 'POST',
+      ...formBody({ q: 'ask alpha what is blocking it' }),
+    });
+
+    expect(res.status).toBe(200);
+    const html = await res.text();
+    expect(html).toContain('hx-post="/api/v1/admin/overlord-send"');
+    expect(html).toContain('What is blocking you?');
+    expect(html).toContain('alpha');
+  });
+
+  it('POST /admin/overlord-send inserts one direct message per known target, skips unknown, pokes chat delivery', async () => {
+    const runner = fakeRunner();
+    const poke = vi.fn();
+    const overlord = fakeOverlord(async () => ({ answer: '', candidates: [] }));
+    const { app, db } = buildApp(runner, undefined, { overlord, pokeChatDelivery: poke });
+    insertSession(db, 'ov-1', null); // seeds instance 'inst-ov-1' at cwd /proj-ov-1
+
+    const res = await app.request('/admin/overlord-send', {
+      method: 'POST',
+      headers: { 'content-type': 'application/x-www-form-urlencoded' },
+      body: `message=${encodeURIComponent('please push')}&targets=inst-ov-1&targets=ghost-instance`,
+    });
+
+    expect(res.status).toBe(200);
+    const html = await res.text();
+    expect(html).toContain('inst-ov-1');
+    expect(poke).toHaveBeenCalledTimes(1);
+
+    const rows = db
+      .prepare("SELECT from_name, to_name, body FROM messages WHERE from_name = 'overlord'")
+      .all() as { from_name: string; to_name: string; body: string }[];
+    expect(rows).toHaveLength(1); // ghost-instance skipped, only the known target got a row
+    expect(rows[0].to_name).toBe('inst-ov-1');
+    expect(rows[0].body).toContain('please push');
+    expect(rows[0].body).toContain("to='overlord'");
+  });
+
+  it('POST /admin/overlord-send 400s on an empty message or no targets', async () => {
+    const runner = fakeRunner();
+    const overlord = fakeOverlord(async () => ({ answer: '', candidates: [] }));
+    const { app } = buildApp(runner, undefined, { overlord });
+
+    const noMessage = await app.request('/admin/overlord-send', { method: 'POST', ...formBody({ targets: 'alpha' }) });
+    expect(noMessage.status).toBe(400);
+
+    const noTargets = await app.request('/admin/overlord-send', { method: 'POST', ...formBody({ message: 'hi' }) });
+    expect(noTargets.status).toBe(400);
+  });
+
+  it('POST /admin/overlord-send 409s when every selected target is unknown', async () => {
+    const runner = fakeRunner();
+    const poke = vi.fn();
+    const overlord = fakeOverlord(async () => ({ answer: '', candidates: [] }));
+    const { app } = buildApp(runner, undefined, { overlord, pokeChatDelivery: poke });
+
+    const res = await app.request('/admin/overlord-send', {
+      method: 'POST',
+      ...formBody({ message: 'hi', targets: 'ghost' }),
+    });
+
+    expect(res.status).toBe(409);
+    expect(poke).not.toHaveBeenCalled();
+  });
+
+  it('POST /admin/overlord-send 503s when overlord is disabled (no overlord dep wired)', async () => {
+    const runner = fakeRunner();
+    const { app } = buildApp(runner); // no overlord passed
+
+    const res = await app.request('/admin/overlord-send', {
+      method: 'POST',
+      ...formBody({ message: 'hi', targets: 'alpha' }),
+    });
+
+    expect(res.status).toBe(503);
+  });
+
+  it('GET /admin/overlord-replies returns messages addressed to overlord after the watermark, marks them read', async () => {
+    const runner = fakeRunner();
+    const { app, db } = buildApp(runner);
+
+    const before = db
+      .prepare("INSERT INTO messages (from_name, to_name, body, urgent, created_at) VALUES ('alpha','overlord','too early',0,?)")
+      .run(Date.now());
+    await app.request('/messages', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ to: 'overlord', body: 'a reply' }),
+    });
+
+    const res = await app.request(`/admin/overlord-replies?afterId=${before.lastInsertRowid}`);
+    expect(res.status).toBe(200);
+    const html = await res.text();
+    expect(html).toContain('a reply');
+    expect(html).not.toContain('too early');
+
+    const reads = db.prepare("SELECT reader_name FROM message_reads WHERE reader_name = 'overlord'").all();
+    expect(reads).toHaveLength(1);
+  });
+
+  it('GET /admin/overlord-replies shows "No replies yet" when there is nothing new', async () => {
+    const runner = fakeRunner();
+    const { app } = buildApp(runner);
+
+    const res = await app.request('/admin/overlord-replies?afterId=0');
+    expect(res.status).toBe(200);
+    expect(await res.text()).toContain('No replies yet');
   });
 });
 

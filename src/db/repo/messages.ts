@@ -113,6 +113,23 @@ export function hasUrgentUnread(db: Database.Database, name: string): boolean {
   return urgentUnreadFor(db, name).length > 0;
 }
 
+// Highest existing message id, or 0 for an empty table. Used by the admin overlord-send route to
+// capture a "since" watermark right before inserting its outgoing messages, so the polled replies
+// view only ever shows what came in after this send (see listToOverlordAfter below).
+export function maxId(db: Database.Database): number {
+  const row = stmt(db, 'SELECT MAX(id) AS maxId FROM messages').get() as { maxId: number | null };
+  return row.maxId ?? 0;
+}
+
+// Overlord ask-mode replies: direct messages addressed to the reserved 'overlord' recipient (see
+// RESERVED_RECIPIENTS in src/mcp/tools.ts), newer than afterId, oldest first — polled by the admin
+// page's GET /api/v1/admin/overlord-replies fragment route.
+export function listToOverlordAfter(db: Database.Database, afterId: number): MessageRow[] {
+  return stmt(db, `SELECT * FROM messages WHERE to_name = 'overlord' AND id > ? ORDER BY id ASC`).all(
+    afterId
+  ) as MessageRow[];
+}
+
 export function listAll(db: Database.Database, limit = 50, beforeId?: number): MessageRow[] {
   if (beforeId !== undefined) {
     return stmt(db, 'SELECT * FROM messages WHERE id < ? ORDER BY id DESC LIMIT ?').all(

@@ -63,3 +63,26 @@ export function purgeOlderThan(db: Database.Database, cutoffMs: number): number 
   const result = stmt(db, 'DELETE FROM session_events WHERE created_at < ?').run(cutoffMs);
   return result.changes;
 }
+
+// Dispatcher confirmation (src/spawn/dispatcher.ts): baseline signal keyed directly off the
+// denormalized instance_name column, so no session/instance row needs to exist yet at baseline
+// time — a brand-new instance name with zero rows baselines at 0, and its very first event (e.g.
+// SessionStart as a freshly spawned tab boots) then counts as "since" the baseline (see the
+// dispatcher's confirmDelivery + CLAUDE.md's dispatch confirmation subsection).
+export function maxIdForInstance(db: Database.Database, instanceName: string): number {
+  const row = stmt(db, 'SELECT MAX(id) AS maxId FROM session_events WHERE instance_name = ?').get(
+    instanceName
+  ) as { maxId: number | null };
+  return row.maxId ?? 0;
+}
+
+// Poll signal paired with maxIdForInstance above: has ANY event for this instance name landed
+// since the captured baseline id.
+export function hasEventSince(db: Database.Database, instanceName: string, afterId: number): boolean {
+  return (
+    stmt(db, 'SELECT 1 FROM session_events WHERE instance_name = ? AND id > ? LIMIT 1').get(
+      instanceName,
+      afterId
+    ) !== undefined
+  );
+}

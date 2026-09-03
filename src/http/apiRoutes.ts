@@ -15,9 +15,12 @@ import type {
   LimitStateName,
   Logger,
   PermissionStatus,
+  RenameBindingSource,
 } from '../types.js';
 import type { HubBus } from '../core/bus.js';
+import { applyInstanceRename, INSTANCE_NAME_RE } from '../core/identity.js';
 import * as instanceAppsRepo from '../db/repo/instanceApps.js';
+import * as instancesRepo from '../db/repo/instances.js';
 import * as sessionsRepo from '../db/repo/sessions.js';
 import * as promptsRepo from '../db/repo/prompts.js';
 import * as eventsRepo from '../db/repo/events.js';
@@ -27,8 +30,11 @@ import * as permissionsRepo from '../db/repo/permissions.js';
 import * as limitRepo from '../db/repo/limit.js';
 import * as pushTokensRepo from '../db/repo/pushTokens.js';
 import type { Athen } from '../kb/athen.js';
+import type { Overlord } from '../overlord/overlord.js';
+import type { Dispatcher, DispatchAction } from '../spawn/dispatcher.js';
 import { readTranscript } from './transcriptRead.js';
 import {
+  newestSessionPerCwd,
   renderErrorFragment,
   renderInstanceApps,
   renderKbEditorEmpty,
@@ -36,8 +42,19 @@ import {
   renderKbList,
   renderKbSearchResults,
   renderMessagesList,
+  renderOverlordAnswer,
+  renderOverlordConfirm,
+  renderOverlordDispatched,
+  renderOverlordDispatchConfirm,
+  renderOverlordReplies,
+  renderOverlordSent,
   renderSessionsList,
 } from './adminUi.js';
+
+// RenameBindingSource now lives in types.js (src/core/identity.ts's applyInstanceRename needs it
+// too, for session-name adoption) — re-exported here for backward compatibility with existing
+// imports of this module.
+export type { RenameBindingSource } from '../types.js';
 
 export interface BuildApiRoutesDeps {
   config: HubConfig;
@@ -54,7 +71,32 @@ export interface BuildApiRoutesDeps {
   pokeChatDelivery?: () => void;
   // orchestrator: pass attach into buildApiRoutes
   attach: IAttachRegistry;
+  // Optional: AI Overlord (natural-language questions over past sessions, admin page tab). Absent
+  // when config.overlord.enabled is false — the fragment route then returns a plain error fragment.
+  overlord?: Overlord;
+  // Optional: executes an AI Overlord dispatch-mode plan (inject into an idle attached terminal,
+  // or open a new one) once a human confirms it. Absent when config.terminalSpawn.enabled is
+  // false — the dispatch route then returns a plain error fragment.
+  dispatcher?: Dispatcher;
+  // Optional: lets admin-page instance rename (below) also update any live hub_register binding
+  // for the renamed instance, so an already-registered MCP session's chat_send/hub_set_url calls
+  // keep resolving to the right (renamed) row without needing to call hub_register again.
+  gateway?: RenameBindingSource;
 }
+
+// Mirrors the admin overlord form's own field cap — defense in depth against a hand-crafted
+// oversized request bypassing the client.
+const MAX_OVERLORD_QUESTION_LENGTH = 500;
+// Mirrors chat_send's own message cap (src/mcp/tools.ts) — an overlord-composed message rides the
+// same delivery machinery as any other chat message.
+const MAX_OVERLORD_MESSAGE_LENGTH = 4000;
+// Appended to every ask-mode message so the recipient agent knows how to reply — 'overlord' has no
+// instances row (see RESERVED_RECIPIENTS in src/mcp/tools.ts), so without this hint an agent would
+// have no way to know a reply back to the sender is even possible via chat_send.
+const OVERLORD_REPLY_HINT = "\n\n(Reply via cc-hub chat_send with to='overlord'.)";
+// Mirrors the mobile API's own prompt cap (POST /sessions etc.) — a dispatched task rides the same
+// injection/spawn path as any other prompt, so it's held to the same size limit.
+const MAX_OVERLORD_TASK_LENGTH = 8000;
 
 function isRecord(v: unknown): v is Record<string, unknown> {
   return typeof v === 'object' && v !== null && !Array.isArray(v);
@@ -136,7 +178,8 @@ function formStr(v: unknown): string {
 }
 
 export function buildApiRoutes(deps: BuildApiRoutesDeps): Hono {
-  const { config, db, bus, log, delivery, watcher, runner, athen, startedAt, pokeChatDelivery, attach } = deps;
+  const { config, db, bus, log, delivery, watcher, runner, athen, startedAt, pokeChatDelivery, attach, overlord, dispatcher, gateway } =
+    deps;
   const app = new Hono();
 
   app.get('/health', (c) => {
@@ -560,21 +603,68 @@ export function buildApiRoutes(deps: BuildApiRoutesDeps): Hono {
   });
 
   // Live sessions (everything not 'ended'), newest activity first, decorated with the attach
-  // registry's live-terminal + working flags. Polled by the admin page every 5s.
+  // registry's live-terminal + working flags. Shared by the GET route below (polled every 5s) and
+  // the rename route further down (so a rename's response can refresh the list in place without
+  // waiting for the next poll tick). Optional folder= substring-filters (case-insensitive) on cwd.
+  // Attach flags apply only to the newest session per cwd — a cc-attach wrapper is one-per-cwd
+  // (well, per resolved NAME — see src/attach/attachRegistry.ts — the folder-level LIVE badge
+  // still applies to the newest session in the directory), so an older lingering row in the same
+  // directory (e.g. a session whose terminal closed without a SessionEnd hook) must not show LIVE.
+  function buildSessionsListHtml(folder: string): string {
+    const rows = sessionsRepo.listJoined(db, { status: ['active', 'idle', 'interrupted', 'continuing'] });
+    const newest = newestSessionPerCwd(rows);
+    let sessions = rows.map((s) => ({
+      id: s.id,
+      instance_id: s.instance_id,
+      instance_name: s.instance_name,
+      cwd: s.cwd,
+      status: s.status,
+      last_event_at: s.last_event_at,
+      last_prompt: s.last_prompt,
+      attached: newest.has(s.id) && attach.get(s.cwd) !== undefined,
+      working: newest.has(s.id) && attach.isWorking(s.cwd),
+      session_name: s.session_name,
+    }));
+    if (folder) sessions = sessions.filter((s) => s.cwd.toLowerCase().includes(folder));
+    return renderSessionsList(sessions);
+  }
+
   app.get('/admin/sessions-list', (c) => {
-    const sessions = sessionsRepo
-      .listJoined(db, { status: ['active', 'idle', 'interrupted', 'continuing'] })
-      .map((s) => ({
-        id: s.id,
-        instance_name: s.instance_name,
-        cwd: s.cwd,
-        status: s.status,
-        last_event_at: s.last_event_at,
-        last_prompt: s.last_prompt,
-        attached: attach.get(s.cwd) !== undefined,
-        working: attach.isWorking(s.cwd),
-      }));
-    return c.html(renderSessionsList(sessions));
+    const folder = (c.req.query('folder') ?? '').trim().toLowerCase();
+    return c.html(buildSessionsListHtml(folder));
+  });
+
+  // Rename a running instance from the admin page — no restart of its terminal required. Updates
+  // the durable `instances.name` row plus the two pieces of live in-memory state that are keyed by
+  // name: the attach registry's client slot (src/attach/attachRegistry.ts's `rename`) and any
+  // still-open hub_register MCP binding (src/mcp/server.ts's `renameBinding`) — both no-ops if
+  // nothing is currently live under the old name. A NAMED terminal's own CC_HUB_NAME env is NOT
+  // updated by this (it's an env var baked into an already-running process) — its statusline falls
+  // back to a cwd lookup until the terminal is relaunched (see model-statusline.mjs); an UNNAMED
+  // terminal has no such caveat since it never depended on the name to begin with.
+  app.post('/admin/instances/rename', async (c) => {
+    const form = await c.req.parseBody();
+    const id = Number(formStr(form.id));
+    if (!Number.isInteger(id)) return c.html(renderErrorFragment('Invalid instance id.'), 400);
+
+    const requested = formStr(form.newName).trim().toLowerCase();
+    if (!INSTANCE_NAME_RE.test(requested)) {
+      return c.html(renderErrorFragment(`Name must match ${INSTANCE_NAME_RE.source} (after lowercasing).`), 400);
+    }
+
+    const instance = instancesRepo.byId(db, id);
+    if (!instance) return c.html(renderErrorFragment('Instance not found.'), 404);
+
+    const collision = instancesRepo.byName(db, requested);
+    if (collision && collision.id !== id) {
+      return c.html(renderErrorFragment(`Name "${requested}" is already used by another instance.`), 409);
+    }
+
+    if (requested !== instance.name) {
+      applyInstanceRename({ db, attach, gateway }, id, instance.name, requested, 'explicit');
+    }
+
+    return c.html(buildSessionsListHtml(''));
   });
 
   // Persistent footer: apps/servers instances have told the hub they're running (via the
@@ -617,6 +707,141 @@ export function buildApiRoutes(deps: BuildApiRoutesDeps): Hono {
     // reasoning as the JSON DELETE /messages/:id route above). The delete button's own hx-target
     // is the message's own card (outerHTML swap), so an empty body here just removes it in place.
     return c.html('');
+  });
+
+  // AI Overlord: natural-language question over past sessions, a message to send live instances
+  // directly, OR a task to dispatch to a project (admin page's "AI Overlord" tab). Same htmx-
+  // fragment pattern as the other /admin/* routes above — form field, not JSON. Ask/dispatch modes
+  // never act here — they only render a confirmation (renderOverlordConfirm /
+  // renderOverlordDispatchConfirm); the actual send/dispatch happens from a second, explicit human
+  // click (POST overlord-send / POST overlord-dispatch below).
+  app.post('/admin/overlord-ask', async (c) => {
+    const form = await c.req.parseBody();
+    const q = formStr(form.q).trim().slice(0, MAX_OVERLORD_QUESTION_LENGTH);
+    if (!q) return c.html(renderErrorFragment('Ask a question first.'), 400);
+    if (!overlord) return c.html(renderErrorFragment('Overlord disabled'), 503);
+
+    try {
+      const result = await overlord.ask(q);
+      if (result.mode === 'ask') {
+        return c.html(renderOverlordConfirm(result.message, result.targets, result.excluded));
+      }
+      if (result.mode === 'dispatch') {
+        return c.html(renderOverlordDispatchConfirm(result));
+      }
+      return c.html(renderOverlordAnswer(result));
+    } catch (err) {
+      log.error('apiRoutes: overlord.ask failed', { error: err instanceof Error ? err.message : String(err) });
+      return c.html(renderErrorFragment('Overlord failed to answer — see hub logs.'), 500);
+    }
+  });
+
+  // AI Overlord ask-mode confirmation's Send button. Inserts one DIRECT message per target,
+  // from_name='overlord' (the reserved sender — see RESERVED_RECIPIENTS in src/mcp/tools.ts; no
+  // instances row, so chatDelivery's instancesRepo.list()-driven loop can never target it), through
+  // exactly the same insert+poke path POST /api/v1/messages uses. Unknown targets (an instance that
+  // vanished between the confirm render and the click) are skipped, not fatal.
+  app.post('/admin/overlord-send', async (c) => {
+    if (!overlord) return c.html(renderErrorFragment('Overlord disabled'), 503);
+
+    const form = await c.req.parseBody({ all: true });
+    const messageField = form.message;
+    const message = formStr(Array.isArray(messageField) ? messageField[0] : messageField)
+      .trim()
+      .slice(0, MAX_OVERLORD_MESSAGE_LENGTH);
+    const targetsField = form.targets;
+    const targetNames = (Array.isArray(targetsField) ? targetsField : targetsField !== undefined ? [targetsField] : [])
+      .map((t) => formStr(t).trim())
+      .filter((t) => t.length > 0);
+
+    if (!message) return c.html(renderErrorFragment('Message is empty.'), 400);
+    if (targetNames.length === 0) return c.html(renderErrorFragment('No targets selected.'), 400);
+
+    // Captured BEFORE inserting — the replies poll only ever wants messages that arrived after
+    // this send, not the send's own rows (also addressed via to_name, but from 'overlord', not to
+    // it) or anything older.
+    const sinceId = messagesRepo.maxId(db);
+    const body = message + OVERLORD_REPLY_HINT;
+
+    const sentTo: string[] = [];
+    for (const name of targetNames) {
+      if (!instancesRepo.byName(db, name)) {
+        log.warn('apiRoutes: overlord-send skipped unknown target', { name });
+        continue;
+      }
+      const sent = messagesRepo.send(db, { from: 'overlord', to: name, body, urgent: false, now: Date.now() });
+      bus.emit({ type: 'message', message: sent });
+      sentTo.push(name);
+    }
+
+    if (sentTo.length === 0) {
+      return c.html(renderErrorFragment('None of the selected targets are known instances anymore.'), 409);
+    }
+
+    pokeChatDelivery?.();
+    return c.html(renderOverlordSent(sentTo, sinceId));
+  });
+
+  // AI Overlord dispatch-mode confirmation's Dispatch button. Re-validates the plan (it can go
+  // stale — the human may take a while to click, or the target terminal may have closed) rather
+  // than trusting the hidden form fields blindly: name format, cwd still exists, and for an
+  // 'inject' plan that a client is still attached under that name (else transparently fall back to
+  // spawning a fresh tab instead of failing outright). Gated on the dispatcher dep AND
+  // config.terminalSpawn.enabled being present, same pattern as the other overlord routes above.
+  app.post('/admin/overlord-dispatch', async (c) => {
+    if (!dispatcher || !config.terminalSpawn.enabled) {
+      return c.html(renderErrorFragment('Terminal dispatch disabled'), 503);
+    }
+
+    const form = await c.req.parseBody();
+    const actionKind = formStr(form.action).trim();
+    const name = formStr(form.name).trim().toLowerCase();
+    const cwd = formStr(form.cwd).trim();
+    const task = formStr(form.task).trim().slice(0, MAX_OVERLORD_TASK_LENGTH);
+
+    if (actionKind !== 'inject' && actionKind !== 'spawn') {
+      return c.html(renderErrorFragment('Invalid dispatch action.'), 400);
+    }
+    if (!INSTANCE_NAME_RE.test(name)) return c.html(renderErrorFragment('Invalid instance name.'), 400);
+    if (!task) return c.html(renderErrorFragment('Task is empty.'), 400);
+
+    try {
+      const st = statSync(cwd);
+      if (!st.isDirectory()) return c.html(renderErrorFragment('Target folder no longer exists.'), 400);
+    } catch {
+      return c.html(renderErrorFragment('Target folder no longer exists.'), 400);
+    }
+
+    const stillAttached = attach.getByName ? attach.getByName(name) !== undefined : attach.get(cwd) !== undefined;
+    const action: DispatchAction =
+      actionKind === 'inject' && stillAttached ? { kind: 'inject', name, cwd } : { kind: 'spawn', name, cwd };
+
+    try {
+      const result = await dispatcher.dispatch(action, task);
+      return c.html(renderOverlordDispatched(result.via, name, cwd, task));
+    } catch (err) {
+      log.error('apiRoutes: overlord dispatch failed', { error: err instanceof Error ? err.message : String(err) });
+      return c.html(renderErrorFragment('Dispatch failed — see hub logs.'), 500);
+    }
+  });
+
+  // Polled by the div renderOverlordSent renders (every 3s) — replies are direct messages addressed
+  // to the reserved 'overlord' recipient. Marks each rendered message read with reader 'overlord'
+  // (INSERT OR IGNORE, via=NULL): this writer only ever touches to_name='overlord' rows, a namespace
+  // no other mark_read writer reads from, so it cannot collide with chatDelivery's via-tagging (see
+  // the mark_read gotcha in CLAUDE.md).
+  app.get('/admin/overlord-replies', (c) => {
+    const afterId = parseIntWithDefault(c.req.query('afterId'), 0);
+    const replies = messagesRepo.listToOverlordAfter(db, afterId);
+    if (replies.length > 0) {
+      messagesRepo.markRead(
+        db,
+        replies.map((m) => m.id),
+        'overlord',
+        Date.now()
+      );
+    }
+    return c.html(renderOverlordReplies(replies));
   });
 
   app.get('/limit', (c) => {

@@ -5,6 +5,7 @@ import { runMigrations } from '../db/migrations.js';
 import { HubBus } from '../core/bus.js';
 import * as instancesRepo from '../db/repo/instances.js';
 import * as instanceAppsRepo from '../db/repo/instanceApps.js';
+import * as sessionsRepo from '../db/repo/sessions.js';
 import { createAthen } from '../kb/athen.js';
 import type { Embedder } from '../kb/embedder.js';
 import { registerHubTools, type HubToolsContext } from './tools.js';
@@ -57,6 +58,258 @@ function buildCtx(
   };
 }
 
+describe('hub_register', () => {
+  it('with no name, derives an instance name from cwd (existing behavior)', () => {
+    const db = buildDb();
+    const tools = captureTools(buildCtx(db));
+
+    const result = tools.get('hub_register')!({ cwd: 'F:\\rts\\wonkybox' }) as { content: { text: string }[] };
+    const parsed = JSON.parse(result.content[0].text) as { instanceName: string };
+
+    expect(parsed.instanceName).toBe('wonkybox');
+    expect(instancesRepo.byName(db, 'wonkybox')?.cwd).toBe('F:\\rts\\wonkybox');
+  });
+
+  it('with an explicit name, creates/reuses that named identity instead of the cwd-derived one', () => {
+    const db = buildDb();
+    const tools = captureTools(buildCtx(db));
+
+    const result = tools.get('hub_register')!({ cwd: 'F:\\rts\\wonkybox', name: 'wb-sync' }) as {
+      content: { text: string }[];
+    };
+    const parsed = JSON.parse(result.content[0].text) as { instanceName: string };
+
+    expect(parsed.instanceName).toBe('wb-sync');
+    expect(instancesRepo.byName(db, 'wb-sync')?.cwd).toBe('F:\\rts\\wonkybox');
+  });
+
+  it('lowercases an explicit name before validating/using it', () => {
+    const db = buildDb();
+    const tools = captureTools(buildCtx(db));
+
+    const result = tools.get('hub_register')!({ cwd: 'F:\\rts\\wonkybox', name: 'WB-Sync' }) as {
+      content: { text: string }[];
+    };
+    expect(JSON.parse(result.content[0].text).instanceName).toBe('wb-sync');
+  });
+
+  it('rejects a name that fails INSTANCE_NAME_RE', () => {
+    const db = buildDb();
+    const tools = captureTools(buildCtx(db));
+
+    const result = tools.get('hub_register')!({ cwd: 'F:\\rts\\wonkybox', name: '-bad' }) as {
+      isError?: boolean;
+      content: { text: string }[];
+    };
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toContain('Invalid name');
+  });
+
+  it('disambiguates an explicit name already claimed by a different cwd, with a numeric suffix', () => {
+    const db = buildDb();
+    instancesRepo.upsertNamed(db, { name: 'wb-sync', cwd: 'F:\\rts\\other', now: Date.now() });
+    const tools = captureTools(buildCtx(db));
+
+    const result = tools.get('hub_register')!({ cwd: 'F:\\rts\\wonkybox', name: 'wb-sync' }) as {
+      content: { text: string }[];
+    };
+    expect(JSON.parse(result.content[0].text).instanceName).toBe('wb-sync-2');
+  });
+
+  it('reuses the existing row when the explicit name is already this cwd\'s own (idempotent re-register)', () => {
+    const db = buildDb();
+    const tools = captureTools(buildCtx(db));
+    tools.get('hub_register')!({ cwd: 'F:\\rts\\wonkybox', name: 'wb-sync' });
+
+    const result = tools.get('hub_register')!({ cwd: 'F:\\rts\\wonkybox', name: 'wb-sync' }) as {
+      content: { text: string }[];
+    };
+    expect(JSON.parse(result.content[0].text).instanceName).toBe('wb-sync');
+    expect(instancesRepo.list(db).filter((i) => i.name === 'wb-sync')).toHaveLength(1);
+  });
+
+  // Regression coverage for the bug where an MCP-calling agent in a named cc-attach terminal
+  // (whose SESSION is already bound to the named instance via CC_HUB_NAME/hooks) would call
+  // hub_register with only cwd and get rebound to the folder's cwd-derived default instance —
+  // collapsing every named task agent sharing that folder into one chat identity.
+  it('an explicit name still wins over a bound session_id and over cwd', () => {
+    const db = buildDb();
+    const now = Date.now();
+    const named = instancesRepo.upsertNamed(db, { name: 'spawn-smoke', cwd: 'F:\\rts\\proj', now });
+    sessionsRepo.upsertFromHook(db, {
+      sessionId: 'sess-1',
+      cwd: 'F:\\rts\\proj',
+      transcriptPath: null,
+      instanceId: named.id,
+      now,
+    });
+
+    const tools = captureTools(buildCtx(db));
+    const result = tools.get('hub_register')!(
+      { cwd: 'F:\\rts\\proj', name: 'explicit-name', session_id: 'sess-1' },
+      { sessionId: 'mcp-test' }
+    ) as { content: { text: string }[] };
+
+    expect(JSON.parse(result.content[0].text).instanceName).toBe('explicit-name');
+  });
+
+  it('REGRESSION: session_id bound to a NAMED instance resolves to that instance, not the cwd default', () => {
+    const db = buildDb();
+    const now = Date.now();
+    const named = instancesRepo.upsertNamed(db, { name: 'spawn-smoke', cwd: 'F:\\rts\\proj', now });
+    sessionsRepo.upsertFromHook(db, {
+      sessionId: 'sess-1',
+      cwd: 'F:\\rts\\proj',
+      transcriptPath: null,
+      instanceId: named.id,
+      now,
+    });
+
+    const tools = captureTools(buildCtx(db));
+    const result = tools.get('hub_register')!(
+      { cwd: 'F:\\rts\\proj', session_id: 'sess-1' },
+      { sessionId: 'mcp-test' }
+    ) as { content: { text: string }[] };
+
+    expect(JSON.parse(result.content[0].text).instanceName).toBe('spawn-smoke');
+    // No spurious cwd-derived default row ("proj") should have been created for this folder.
+    expect(instancesRepo.byCwd(db, 'F:\\rts\\proj')).toBeUndefined();
+  });
+
+  it('an unknown/unbound session_id falls back to the cwd default', () => {
+    const db = buildDb();
+
+    const tools = captureTools(buildCtx(db));
+    const result = tools.get('hub_register')!(
+      { cwd: 'F:\\rts\\wonkybox', session_id: 'no-such-session' },
+      { sessionId: 'mcp-test' }
+    ) as { content: { text: string }[] };
+
+    expect(JSON.parse(result.content[0].text).instanceName).toBe('wonkybox');
+  });
+
+  // Tier 3 — regression coverage for the bug where a dispatched task agent's MCP call, made with
+  // only `cwd` (no session_id/name — models don't reliably pass either even when told their
+  // identity), resolved to the folder's cwd-derived default instance instead of the terminal's
+  // own named task identity. hub_register now falls back to the sole active session in that cwd
+  // bound to a NAMED instance, before ever deriving a cwd default.
+  it('REGRESSION: cwd-only call with exactly one active named session in that cwd binds to it, not the cwd default', () => {
+    const db = buildDb();
+    const now = Date.now();
+    const named = instancesRepo.upsertNamed(db, { name: 'spawn-smoke2', cwd: 'F:\\rts\\proj', now });
+    sessionsRepo.upsertFromHook(db, {
+      sessionId: 'sess-1',
+      cwd: 'F:\\rts\\proj',
+      transcriptPath: null,
+      instanceId: named.id,
+      now,
+    });
+
+    const tools = captureTools(buildCtx(db));
+    const result = tools.get('hub_register')!({ cwd: 'F:\\rts\\proj' }) as { content: { text: string }[] };
+
+    expect(JSON.parse(result.content[0].text).instanceName).toBe('spawn-smoke2');
+    // No spurious cwd-derived default row ("proj") should have been created for this folder.
+    expect(instancesRepo.byCwd(db, 'F:\\rts\\proj')).toBeUndefined();
+  });
+
+  it('cwd-only call with TWO active named sessions sharing that cwd is ambiguous -> falls through to the cwd default', () => {
+    const db = buildDb();
+    const now = Date.now();
+    const named1 = instancesRepo.upsertNamed(db, { name: 'task-a', cwd: 'F:\\rts\\proj', now });
+    const named2 = instancesRepo.upsertNamed(db, { name: 'task-b', cwd: 'F:\\rts\\proj', now });
+    sessionsRepo.upsertFromHook(db, {
+      sessionId: 'sess-a',
+      cwd: 'F:\\rts\\proj',
+      transcriptPath: null,
+      instanceId: named1.id,
+      now,
+    });
+    sessionsRepo.upsertFromHook(db, {
+      sessionId: 'sess-b',
+      cwd: 'F:\\rts\\proj',
+      transcriptPath: null,
+      instanceId: named2.id,
+      now,
+    });
+
+    const tools = captureTools(buildCtx(db));
+    const result = tools.get('hub_register')!({ cwd: 'F:\\rts\\proj' }) as { content: { text: string }[] };
+
+    expect(JSON.parse(result.content[0].text).instanceName).toBe('proj');
+  });
+
+  it('cwd-only call with only an ENDED named session in that cwd falls through to the cwd default', () => {
+    const db = buildDb();
+    const now = Date.now();
+    const named = instancesRepo.upsertNamed(db, { name: 'spawn-smoke2', cwd: 'F:\\rts\\proj', now });
+    sessionsRepo.upsertFromHook(db, {
+      sessionId: 'sess-1',
+      cwd: 'F:\\rts\\proj',
+      transcriptPath: null,
+      instanceId: named.id,
+      now,
+    });
+    sessionsRepo.setStatus(db, 'sess-1', 'ended', now);
+
+    const tools = captureTools(buildCtx(db));
+    const result = tools.get('hub_register')!({ cwd: 'F:\\rts\\proj' }) as { content: { text: string }[] };
+
+    expect(JSON.parse(result.content[0].text).instanceName).toBe('proj');
+  });
+
+  it('an explicit name still wins over an active named session in the same cwd', () => {
+    const db = buildDb();
+    const now = Date.now();
+    const named = instancesRepo.upsertNamed(db, { name: 'spawn-smoke2', cwd: 'F:\\rts\\proj', now });
+    sessionsRepo.upsertFromHook(db, {
+      sessionId: 'sess-1',
+      cwd: 'F:\\rts\\proj',
+      transcriptPath: null,
+      instanceId: named.id,
+      now,
+    });
+
+    const tools = captureTools(buildCtx(db));
+    const result = tools.get('hub_register')!({ cwd: 'F:\\rts\\proj', name: 'other-task' }) as {
+      content: { text: string }[];
+    };
+
+    expect(JSON.parse(result.content[0].text).instanceName).toBe('other-task');
+  });
+
+  it('a bound session_id still wins over the active-named-session tier', () => {
+    const db = buildDb();
+    const now = Date.now();
+    const boundNamed = instancesRepo.upsertNamed(db, { name: 'bound-task', cwd: 'F:\\rts\\proj', now });
+    const otherNamed = instancesRepo.upsertNamed(db, { name: 'other-task', cwd: 'F:\\rts\\proj', now });
+    sessionsRepo.upsertFromHook(db, {
+      sessionId: 'sess-bound',
+      cwd: 'F:\\rts\\proj',
+      transcriptPath: null,
+      instanceId: boundNamed.id,
+      now,
+    });
+    sessionsRepo.upsertFromHook(db, {
+      sessionId: 'sess-other',
+      cwd: 'F:\\rts\\proj',
+      transcriptPath: null,
+      instanceId: otherNamed.id,
+      now,
+    });
+
+    const tools = captureTools(buildCtx(db));
+    const result = tools.get('hub_register')!(
+      { cwd: 'F:\\rts\\proj', session_id: 'sess-bound' },
+      { sessionId: 'mcp-test' }
+    ) as { content: { text: string }[] };
+
+    // Even though 'sess-other' also makes the cwd ambiguous for the tier-3 lookup, the bound
+    // session_id (tier 2) is checked first and short-circuits before tier 3 ever runs.
+    expect(JSON.parse(result.content[0].text).instanceName).toBe('bound-task');
+  });
+});
+
 describe('chat_send', () => {
   it('pokes the chat delivery loop on a direct send and on a broadcast', () => {
     const db = buildDb();
@@ -87,6 +340,22 @@ describe('chat_send', () => {
 
     expect(result.isError).toBe(true);
     expect(poke).not.toHaveBeenCalled();
+  });
+
+  it('accepts "overlord" as a recipient even though it has no instances row (AI Overlord ask-mode replies)', () => {
+    const db = buildDb();
+    instancesRepo.upsert(db, { name: 'alpha', cwd: '/alpha', now: Date.now() });
+
+    const poke = vi.fn();
+    const tools = captureTools(buildCtx(db, poke));
+    const result = tools.get('chat_send')!({ to: 'overlord', message: 'reply to overlord', urgent: false }) as {
+      isError?: boolean;
+      content: { text: string }[];
+    };
+
+    expect(result.isError).toBeUndefined();
+    expect(JSON.parse(result.content[0].text).to_name).toBe('overlord');
+    expect(poke).toHaveBeenCalledTimes(1);
   });
 
   it('works without a pokeChatDelivery dep (chatDelivery disabled)', () => {

@@ -1,5 +1,5 @@
 import type Database from 'better-sqlite3';
-import type { SessionRow, SessionStatus, SessionJoined } from '../../types.js';
+import type { SessionRow, SessionStatus, SessionJoined, InstanceRow } from '../../types.js';
 
 const cache = new WeakMap<Database.Database, Map<string, Database.Statement>>();
 function stmt(db: Database.Database, sql: string): Database.Statement {
@@ -63,7 +63,17 @@ export function upsertFromHook(
     continues_today: 0,
     continues_date: null,
     interrupted_at: null,
+    session_name: null,
   };
+}
+
+// Statusline-reported Claude Code session name (what `/name <x>` sets, or CC's own auto-generated
+// conversation title — see CLAUDE.md's "Session names" subsection). Caller (hooksRoutes.ts's
+// POST /hooks/session-name) has already checked the session row exists. `now` is accepted for
+// signature symmetry with the repo's other setters but unused — a session-name report is not a
+// recency signal worth touching last_event_at for.
+export function setSessionName(db: Database.Database, id: string, name: string, _now: number): void {
+  stmt(db, 'UPDATE sessions SET session_name = ? WHERE id = ?').run(name, id);
 }
 
 // Every status transition also refreshes last_event_at so downstream recency checks (interrupted
@@ -221,6 +231,64 @@ export function hasActiveSession(db: Database.Database, instanceId: number): boo
     instanceId
   ) as { id: string } | undefined;
   return row !== undefined;
+}
+
+// hub_register's tier-3 resolution (see CLAUDE.md's Identity model): an MCP-calling agent inside
+// a dispatched, NAMED cc-attach terminal often calls hub_register with only `cwd` — models don't
+// reliably pass `session_id`/`name` even when the SessionStart banner tells them their identity.
+// Resolving purely from cwd would then collapse that agent's chat identity into the folder's
+// cwd-derived default instance, alongside every other unnamed session in the same directory. This
+// is the fallback: the sole non-ended session in this cwd (NOCASE) that's bound to a NAMED
+// instance. Returns that instance only when exactly one DISTINCT named instance matches — zero or
+// more than one is ambiguous (e.g. two concurrent named task agents sharing a folder) and must
+// fall through to the cwd default rather than risk misrouting one task's mail to another.
+export function soleActiveNamedInstanceForCwd(db: Database.Database, cwd: string): InstanceRow | undefined {
+  const rows = stmt(
+    db,
+    `SELECT DISTINCT instances.id, instances.name, instances.cwd, instances.alias,
+            instances.first_seen_at, instances.last_seen_at, instances.app_url, instances.app_url_at, instances.named
+     FROM sessions
+     JOIN instances ON instances.id = sessions.instance_id
+     WHERE sessions.cwd = ? COLLATE NOCASE
+       AND sessions.status != 'ended'
+       AND instances.named = 1`
+  ).all(cwd) as InstanceRow[];
+
+  return rows.length === 1 ? rows[0] : undefined;
+}
+
+// Dispatcher confirmation (src/spawn/dispatcher.ts): whether any session belonging to the target
+// instance is currently active — resolved primarily by instance NAME (the dispatch name), falling
+// back to matching on `cwd` for the case the instance row itself doesn't exist yet at poll time
+// (a brand-new spawn's instance isn't created until its SessionStart hook fires). A single OR'd
+// query rather than a name-then-cwd resolution dance — see CLAUDE.md's dispatch confirmation
+// subsection.
+export function hasActiveSessionForInstance(db: Database.Database, name: string, cwd: string): boolean {
+  const row = stmt(
+    db,
+    `SELECT sessions.id FROM sessions
+     LEFT JOIN instances ON instances.id = sessions.instance_id
+     WHERE sessions.status = 'active' AND (instances.name = ? OR sessions.cwd = ? COLLATE NOCASE)
+     LIMIT 1`
+  ).get(name, cwd) as { id: string } | undefined;
+  return row !== undefined;
+}
+
+// Stale-session reaper candidates (src/sessions/reaper.ts): every non-ended session whose
+// last_event_at is more than olderThanMs milliseconds in the past, regardless of status
+// ('active'/'idle'/'interrupted'/'continuing' — a force-killed terminal can leave a session
+// stuck in any of these). instance_name comes along via the join so the reaper can check the
+// resolved name against the attach registry without a second query per row.
+export function listStale(db: Database.Database, olderThanMs: number): SessionJoined[] {
+  const cutoff = Date.now() - olderThanMs;
+  return stmt(
+    db,
+    `SELECT sessions.*, instances.name AS instance_name
+     FROM sessions
+     LEFT JOIN instances ON instances.id = sessions.instance_id
+     WHERE sessions.status != 'ended' AND sessions.last_event_at < ?
+     ORDER BY sessions.last_event_at ASC`
+  ).all(cutoff) as SessionJoined[];
 }
 
 export function findRecentByCwd(

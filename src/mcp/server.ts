@@ -54,6 +54,19 @@ export class McpGateway {
     return this.bindings.get(mcpSessionId);
   }
 
+  // Admin-page instance rename (src/http/apiRoutes.ts's POST /admin/instances/rename): bindings
+  // are keyed by MCP session id and store the instance NAME (a snapshot taken at hub_register
+  // time), so a rename must be pushed into every binding that still carries the old name —
+  // otherwise an already-registered MCP session's chat_send/hub_set_url calls would keep
+  // resolving against the stale name until it calls hub_register again.
+  renameBinding(oldName: string, newName: string): void {
+    for (const [sessionId, identity] of this.bindings) {
+      if (identity.instanceName === oldName) {
+        this.bindings.set(sessionId, { ...identity, instanceName: newName });
+      }
+    }
+  }
+
   async handle(c: Context<{ Bindings: HttpBindings }>): Promise<Response> {
     const method = c.req.method;
     const sessionIdHeader = c.req.header('mcp-session-id');

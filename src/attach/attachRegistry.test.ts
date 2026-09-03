@@ -256,6 +256,21 @@ describe('AttachRegistry', () => {
     registry.stop();
   });
 
+  it('isWorkingByName is the name-precise counterpart to isWorking(cwd) — set on one named sibling, false for another', () => {
+    const log = silentLogger();
+    const bus = fakeBus();
+    const registry = new AttachRegistry({ log, bus }, 30_000);
+    registry.register('/proj', fakeClient(fakeWs()), 'wb-sync');
+    registry.register('/proj', fakeClient(fakeWs()), 'cd-new');
+
+    registry.setWorking('/proj', true); // targets the most-recently-registered slot ('cd-new')
+
+    expect(registry.isWorkingByName('cd-new')).toBe(true);
+    expect(registry.isWorkingByName('wb-sync')).toBe(false);
+    expect(registry.isWorkingByName('nobody')).toBe(false);
+    registry.stop();
+  });
+
   it('unregister clears the working flag along with the client', () => {
     const log = silentLogger();
     const bus = fakeBus();
@@ -283,6 +298,238 @@ describe('AttachRegistry', () => {
     vi.advanceTimersByTime(heartbeatMs * 3);
 
     expect(registry.isWorking('/proj')).toBe(false);
+    registry.stop();
+  });
+
+  // --- Named per-task agent identities: several clients can share one cwd ---
+
+  it('named clients coexist in one cwd — registering a different name does NOT displace', () => {
+    const log = silentLogger();
+    const bus = fakeBus();
+    const registry = new AttachRegistry({ log, bus }, 30_000);
+    const wsA = fakeWs();
+    const wsB = fakeWs();
+
+    registry.register('/proj', fakeClient(wsA), 'wb-sync');
+    registry.register('/proj', fakeClient(wsB), 'cd-new');
+
+    expect(registry.getByName('wb-sync')?.ws).toBe(wsA);
+    expect(registry.getByName('cd-new')?.ws).toBe(wsB);
+    expect(wsA.close).not.toHaveBeenCalled();
+    expect(wsB.close).not.toHaveBeenCalled();
+    expect(registry.count()).toBe(2);
+    registry.stop();
+  });
+
+  it('registering the same name again displaces only that name\'s client, not a sibling', () => {
+    const log = silentLogger();
+    const bus = fakeBus();
+    const registry = new AttachRegistry({ log, bus }, 30_000);
+    const wsA = fakeWs();
+    const wsB = fakeWs();
+    const wsA2 = fakeWs();
+
+    registry.register('/proj', fakeClient(wsA), 'wb-sync');
+    registry.register('/proj', fakeClient(wsB), 'cd-new');
+    registry.register('/proj', fakeClient(wsA2), 'wb-sync');
+
+    expect(wsA.close).toHaveBeenCalled();
+    expect(wsB.close).not.toHaveBeenCalled();
+    expect(registry.getByName('wb-sync')?.ws).toBe(wsA2);
+    expect(registry.getByName('cd-new')?.ws).toBe(wsB);
+    registry.stop();
+  });
+
+  it('injectByName sends to the exact named client, not a more-recently-registered sibling', () => {
+    const log = silentLogger();
+    const bus = fakeBus();
+    const registry = new AttachRegistry({ log, bus }, 30_000);
+    const wsA = fakeWs();
+    const wsB = fakeWs();
+    registry.register('/proj', fakeClient(wsA), 'wb-sync');
+    registry.register('/proj', fakeClient(wsB), 'cd-new'); // registered later, same cwd
+
+    const result = registry.injectByName('wb-sync', 'hello wb-sync');
+
+    expect(result).toBe(true);
+    expect(wsA.send).toHaveBeenCalledWith(JSON.stringify({ t: 'inject', prompt: 'hello wb-sync', submit: true }));
+    expect(wsB.send).not.toHaveBeenCalled();
+    registry.stop();
+  });
+
+  it('injectByName returns false for an unknown name without touching any client', () => {
+    const log = silentLogger();
+    const bus = fakeBus();
+    const registry = new AttachRegistry({ log, bus }, 30_000);
+    const ws = fakeWs();
+    registry.register('/proj', fakeClient(ws), 'wb-sync');
+
+    expect(registry.injectByName('nobody', 'hi')).toBe(false);
+    expect(ws.send).not.toHaveBeenCalled();
+    registry.stop();
+  });
+
+  it('cwd-keyed get/inject aggregate to the MOST RECENTLY REGISTERED client at that cwd', () => {
+    const log = silentLogger();
+    const bus = fakeBus();
+    const registry = new AttachRegistry({ log, bus }, 30_000);
+    const wsOld = fakeWs();
+    const wsNew = fakeWs();
+    registry.register('/proj', fakeClient(wsOld), 'wb-sync');
+    registry.register('/proj', fakeClient(wsNew), 'cd-new');
+
+    expect(registry.get('/proj')?.ws).toBe(wsNew);
+
+    registry.inject('/proj', 'hi');
+    expect(wsNew.send).toHaveBeenCalled();
+    expect(wsOld.send).not.toHaveBeenCalled();
+    registry.stop();
+  });
+
+  it('isWorking(cwd) sees a non-most-recently-registered client working (read-side OR, not "most recent")', () => {
+    const log = silentLogger();
+    const bus = fakeBus();
+    const registry = new AttachRegistry({ log, bus }, 30_000);
+    registry.register('/proj', fakeClient(fakeWs()), 'older'); // registered first -> "most recent" write targets this one below
+    // setWorking(cwd) writes to the most-recently-registered slot, which at this point is 'older'.
+    registry.setWorking('/proj', true);
+    registry.register('/proj', fakeClient(fakeWs()), 'newer'); // now the most-recent slot for reads
+
+    // isWorking(cwd) must still report true even though the WORKING flag lives on 'older', not
+    // the now-most-recently-registered 'newer' slot — it's a genuine OR across the whole cwd.
+    expect(registry.isWorking('/proj')).toBe(true);
+    registry.stop();
+  });
+
+  it('rename re-keys a live client entry, its ring, and its working flag', () => {
+    const log = silentLogger();
+    const bus = fakeBus();
+    const registry = new AttachRegistry({ log, bus }, 30_000);
+    const ws = fakeWs();
+    registry.register('/proj', fakeClient(ws), 'wb-sync');
+    registry.setWorking('/proj', true);
+    registry.ingestOutput('/proj', Buffer.from('hello').toString('base64'));
+
+    registry.rename('wb-sync', 'wb-sync-2');
+
+    expect(registry.getByName('wb-sync')).toBeUndefined();
+    expect(registry.getByName('wb-sync-2')?.ws).toBe(ws);
+    expect(registry.isWorking('/proj')).toBe(true); // working flag followed the rename
+    expect(registry.getRingB64('/proj')).toBe(Buffer.from('hello').toString('base64')); // ring followed too
+    registry.stop();
+  });
+
+  it('rename is a no-op when nothing is registered under the old name', () => {
+    const log = silentLogger();
+    const bus = fakeBus();
+    const registry = new AttachRegistry({ log, bus }, 30_000);
+
+    expect(() => registry.rename('nobody', 'someone')).not.toThrow();
+    expect(registry.getByName('someone')).toBeUndefined();
+    registry.stop();
+  });
+
+  it('unnamed register() still defaults to a pure cwd-derived key (existing behavior preserved)', () => {
+    const log = silentLogger();
+    const bus = fakeBus();
+    const registry = new AttachRegistry({ log, bus }, 30_000);
+    const ws = fakeWs();
+    registry.register('/proj/wonkybox', fakeClient(ws));
+
+    expect(registry.getByName('wonkybox')?.ws).toBe(ws);
+    registry.stop();
+  });
+
+  // --- TUI readiness (see src/attach/outputScanner.ts's onReady) ---
+
+  it('isReadyByName/isReady(cwd) default to false for a client that never reported ready', () => {
+    const log = silentLogger();
+    const bus = fakeBus();
+    const registry = new AttachRegistry({ log, bus }, 30_000);
+    registry.register('/proj', fakeClient(fakeWs()), 'wb-sync');
+
+    expect(registry.isReadyByName('wb-sync')).toBe(false);
+    expect(registry.isReady('/proj')).toBe(false);
+    registry.stop();
+  });
+
+  it('setReady(cwd) marks the most-recently-registered client at that cwd ready', () => {
+    const log = silentLogger();
+    const bus = fakeBus();
+    const registry = new AttachRegistry({ log, bus }, 30_000);
+    registry.register('/proj', fakeClient(fakeWs()), 'wb-sync');
+
+    registry.setReady('/proj');
+
+    expect(registry.isReadyByName('wb-sync')).toBe(true);
+    expect(registry.isReady('/proj')).toBe(true);
+    registry.stop();
+  });
+
+  it('isReady(cwd) is a genuine OR across named siblings sharing a cwd, like isWorking', () => {
+    const log = silentLogger();
+    const bus = fakeBus();
+    const registry = new AttachRegistry({ log, bus }, 30_000);
+    registry.register('/proj', fakeClient(fakeWs()), 'older'); // "most recent" write target below
+    registry.setReady('/proj'); // marks 'older' ready
+    registry.register('/proj', fakeClient(fakeWs()), 'newer'); // now the most-recent slot
+
+    // 'newer' never reported ready, but isReady(cwd) must still see 'older's readiness — OR, not
+    // "most recent".
+    expect(registry.isReadyByName('newer')).toBe(false);
+    expect(registry.isReady('/proj')).toBe(true);
+    registry.stop();
+  });
+
+  it('re-registering the same name resets readiness to false (a new wrapper/claude is booting)', () => {
+    const log = silentLogger();
+    const bus = fakeBus();
+    const registry = new AttachRegistry({ log, bus }, 30_000);
+    registry.register('/proj', fakeClient(fakeWs()), 'wb-sync');
+    registry.setReady('/proj');
+    expect(registry.isReadyByName('wb-sync')).toBe(true);
+
+    registry.register('/proj', fakeClient(fakeWs()), 'wb-sync'); // displaced by a new wrapper
+
+    expect(registry.isReadyByName('wb-sync')).toBe(false);
+    registry.stop();
+  });
+
+  it('setReady(cwd) with no client registered there is a no-op', () => {
+    const log = silentLogger();
+    const bus = fakeBus();
+    const registry = new AttachRegistry({ log, bus }, 30_000);
+
+    expect(() => registry.setReady('/nowhere')).not.toThrow();
+    expect(registry.isReady('/nowhere')).toBe(false);
+    registry.stop();
+  });
+
+  it('unregister clears the ready flag along with the client', () => {
+    const log = silentLogger();
+    const bus = fakeBus();
+    const registry = new AttachRegistry({ log, bus }, 30_000);
+    const ws = fakeWs();
+    registry.register('/proj', fakeClient(ws), 'wb-sync');
+    registry.setReady('/proj');
+
+    registry.unregister('/proj', ws);
+
+    expect(registry.isReadyByName('wb-sync')).toBe(false);
+    registry.stop();
+  });
+
+  it('rename carries the ready flag over to the new name', () => {
+    const log = silentLogger();
+    const bus = fakeBus();
+    const registry = new AttachRegistry({ log, bus }, 30_000);
+    registry.register('/proj', fakeClient(fakeWs()), 'wb-sync');
+    registry.setReady('/proj');
+
+    registry.rename('wb-sync', 'wb-sync-2');
+
+    expect(registry.isReadyByName('wb-sync')).toBe(false);
+    expect(registry.isReadyByName('wb-sync-2')).toBe(true);
     registry.stop();
   });
 });

@@ -3,6 +3,16 @@ import type Database from 'better-sqlite3';
 interface Migration {
   version: number;
   sql: string;
+  // Set for a migration that rebuilds a table other tables hold a FOREIGN KEY reference to (SQLite
+  // has no ALTER TABLE DROP CONSTRAINT, so dropping e.g. a UNIQUE constraint means create-new/copy/
+  // drop-old/rename). With foreign_keys=ON (production's openDb() sets this before ever calling
+  // runMigrations), dropping a table referenced by another's FK raises "FOREIGN KEY constraint
+  // failed" even though the rename immediately restores an equivalent table under the same name —
+  // SQLite's FK checker doesn't treat a DROP immediately followed by a same-named RENAME as one
+  // atomic "the parent still exists" operation. The fix — pragma foreign_keys=OFF around the rebuild — is
+  // itself a no-op if attempted *inside* a transaction, so migrations flagging this run OUTSIDE the
+  // normal per-migration transaction wrapper below (own transaction, own commit) instead.
+  disableForeignKeys?: boolean;
 }
 
 const MIGRATIONS: Migration[] = [
@@ -180,7 +190,57 @@ const MIGRATIONS: Migration[] = [
       );
     `,
   },
+  {
+    // Named per-task agent identities (cc-attach --name / CC_HUB_NAME / hub_register name): a
+    // single project directory can now host more than one instance identity at once (e.g. two
+    // named agents working different tasks in the same repo), so `cwd` can no longer be UNIQUE.
+    // SQLite has no ALTER TABLE DROP CONSTRAINT, so the table is rebuilt. `named` distinguishes
+    // the single cwd-derived "default" identity (named=0, at most one per cwd — the pre-existing
+    // one-identity-per-folder behavior) from explicitly-named siblings (named=1, any number per
+    // cwd) — see src/core/identity.ts's resolveExplicitInstanceName / instances repo's byCwd.
+    version: 7,
+    disableForeignKeys: true,
+    sql: `
+      CREATE TABLE instances_new (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        name TEXT NOT NULL UNIQUE,
+        cwd TEXT NOT NULL,
+        alias TEXT,
+        first_seen_at INTEGER NOT NULL,
+        last_seen_at INTEGER NOT NULL,
+        app_url TEXT,
+        app_url_at INTEGER,
+        named INTEGER NOT NULL DEFAULT 0
+      );
+      INSERT INTO instances_new (id, name, cwd, alias, first_seen_at, last_seen_at, app_url, app_url_at, named)
+        SELECT id, name, cwd, alias, first_seen_at, last_seen_at, app_url, app_url_at, 0 FROM instances;
+      DROP TABLE instances;
+      ALTER TABLE instances_new RENAME TO instances;
+      CREATE INDEX IF NOT EXISTS idx_instances_cwd ON instances(cwd);
+    `,
+  },
+  {
+    // Session names (see CLAUDE.md's "Session names" subsection): the statusline reports what
+    // Claude Code's `/name <x>` sets (or its own auto-generated conversation title — the payload
+    // carries no flag telling the two apart) to POST /hooks/session-name, which stores it here for
+    // display and, when it looks like a deliberate short label (src/core/sessionNameIdentity.ts),
+    // adopts it as the instance's identity. `name_source` tracks provenance so adoption never
+    // silently overrides a name the user set explicitly (cc-attach --name / hub_register name /
+    // the admin ✎ rename) — see src/core/identity.ts's applyInstanceRename.
+    version: 8,
+    sql: `
+      ALTER TABLE sessions ADD COLUMN session_name TEXT;
+      ALTER TABLE instances ADD COLUMN name_source TEXT NOT NULL DEFAULT 'cwd';
+    `,
+  },
 ];
+
+function recordVersion(db: Database.Database, version: number): void {
+  db.prepare(
+    `INSERT INTO meta (key, value) VALUES ('schema_version', ?)
+     ON CONFLICT(key) DO UPDATE SET value = excluded.value`
+  ).run(String(version));
+}
 
 export function runMigrations(db: Database.Database): void {
   db.exec(`CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT)`);
@@ -193,15 +253,40 @@ export function runMigrations(db: Database.Database): void {
   for (const migration of MIGRATIONS) {
     if (migration.version <= currentVersion) continue;
 
-    const applyMigration = db.transaction(() => {
-      db.exec(migration.sql);
-      db.prepare(
-        `INSERT INTO meta (key, value) VALUES ('schema_version', ?)
-         ON CONFLICT(key) DO UPDATE SET value = excluded.value`
-      ).run(String(migration.version));
-    });
+    if (migration.disableForeignKeys) {
+      // PRAGMA foreign_keys is a no-op inside a transaction, so this one runs its own
+      // transaction rather than reusing the shared wrapper below — see the Migration interface's
+      // `disableForeignKeys` doc comment for why a table rebuild needs this at all.
+      const fkWasOn = db.pragma('foreign_keys', { simple: true }) === 1;
+      db.pragma('foreign_keys = OFF');
+      try {
+        const applyMigration = db.transaction(() => {
+          db.exec(migration.sql);
+          recordVersion(db, migration.version);
+        });
+        applyMigration();
 
-    applyMigration();
+        // The rebuild's own INSERT...SELECT should make this a no-op, but a real check costs
+        // little and turns any future mistake here into a loud failure instead of silent
+        // data-integrity corruption in a user's database.
+        const violations = db.pragma('foreign_key_check') as unknown[];
+        if (violations.length > 0) {
+          throw new Error(
+            `migrations: migration ${migration.version} left ${violations.length} foreign key violation(s)`
+          );
+        }
+      } finally {
+        if (fkWasOn) db.pragma('foreign_keys = ON');
+      }
+    } else {
+      const applyMigration = db.transaction(() => {
+        db.exec(migration.sql);
+        recordVersion(db, migration.version);
+      });
+
+      applyMigration();
+    }
+
     currentVersion = migration.version;
   }
 }

@@ -49,9 +49,16 @@ export function startLimitWatcher(deps: WatcherDeps): ILimitWatcher {
   let lastResetsAt: number | null = null;
   let lastOkPollAt: number | null = null;
   let lastTickAt = 0;
+  let lastScheduledMs = config.limitWatcher.pollIntervalMs;
   let ticking = false;
   let stopped = false;
   let timer: ReturnType<typeof setTimeout> | null = null;
+
+  function setState(next: typeof currentState, ctx: Record<string, unknown> = {}): void {
+    if (next === currentState) return;
+    log.info(`limit watcher: state ${currentState} -> ${next}`, ctx);
+    currentState = next;
+  }
 
   function clearTimer(): void {
     if (timer) {
@@ -123,7 +130,7 @@ export function startLimitWatcher(deps: WatcherDeps): ILimitWatcher {
   }
 
   async function enterContinuing(now: number): Promise<void> {
-    currentState = 'continuing';
+    setState('continuing');
     limitRepo.recordEvent(db, 'continuing', {}, now);
     persistAndEmit(now, null);
 
@@ -162,7 +169,7 @@ export function startLimitWatcher(deps: WatcherDeps): ILimitWatcher {
     // off 'interrupted' status themselves.
     sessions.resetInterruptedToIdle(db);
     limitRepo.recordEvent(db, 'resumed', {}, now);
-    currentState = 'ok';
+    setState('ok');
   }
 
   async function tick(): Promise<void> {
@@ -173,7 +180,10 @@ export function startLimitWatcher(deps: WatcherDeps): ILimitWatcher {
 
       if (lastTickAt !== 0) {
         const gap = now - lastTickAt;
-        if (gap > FIVE_MIN_MS) {
+        // A real sleep/wake gap dwarfs any scheduled interval — during 429/auth backoff the
+        // scheduled interval itself can be five minutes, so compare against the interval that
+        // was actually scheduled rather than a fixed five-minute floor.
+        if (gap > Math.max(FIVE_MIN_MS, lastScheduledMs * 2)) {
           log.warn(`limit watcher: ${gap}ms gap since last tick — likely machine sleep/wake`, {
             gapMs: gap,
           });
@@ -186,7 +196,7 @@ export function startLimitWatcher(deps: WatcherDeps): ILimitWatcher {
 
       if (!result.ok) {
         log.warn(`limit watcher: usage poll failed (${result.error.kind}): ${result.error.message}`);
-        currentState = 'unknown';
+        setState('unknown', { error: result.error.message });
         persistAndEmit(now, result.error.message);
         intervalMs = result.error.kind === 'net' ? config.limitWatcher.retryIntervalMs : FIVE_MIN_MS;
       } else {
@@ -206,11 +216,11 @@ export function startLimitWatcher(deps: WatcherDeps): ILimitWatcher {
                 now
               );
               limitRepo.recordEvent(db, 'limited', usage.raw, now);
-              currentState = 'limited';
+              setState('limited', { pct: usage.pct });
             } else if (currentState === 'unknown') {
               sessions.resetInterruptedToIdle(db);
               limitRepo.recordEvent(db, 'recovered', { pct: usage.pct }, now);
-              currentState = 'ok';
+              setState('ok', { pct: usage.pct });
             }
             break;
           }
@@ -218,10 +228,10 @@ export function startLimitWatcher(deps: WatcherDeps): ILimitWatcher {
             if (!overThreshold) {
               sessions.resetInterruptedToIdle(db);
               limitRepo.recordEvent(db, 'recovered', { pct: usage.pct }, now);
-              currentState = 'ok';
+              setState('ok', { pct: usage.pct });
             } else if (lastResetsAt !== null) {
               limitRepo.recordEvent(db, 'waiting_reset', { resetsAtMs: lastResetsAt }, now);
-              currentState = 'waiting_reset';
+              setState('waiting_reset', { resetsAtMs: lastResetsAt });
             }
             break;
           }
@@ -239,7 +249,7 @@ export function startLimitWatcher(deps: WatcherDeps): ILimitWatcher {
               // never entering 'continuing' when autoContinue is off.
               sessions.resetInterruptedToIdle(db);
               limitRepo.recordEvent(db, 'recovered', { pct: usage.pct }, now);
-              currentState = 'ok';
+              setState('ok', { pct: usage.pct });
             }
             break;
           }
@@ -253,6 +263,7 @@ export function startLimitWatcher(deps: WatcherDeps): ILimitWatcher {
         intervalMs = currentState === 'limited' ? FIVE_MIN_MS : config.limitWatcher.pollIntervalMs;
       }
 
+      lastScheduledMs = intervalMs;
       scheduleNext(intervalMs);
     } catch (err) {
       // tick() is always invoked fire-and-forget (`void tick()`), so any exception here would
@@ -285,7 +296,7 @@ export function startLimitWatcher(deps: WatcherDeps): ILimitWatcher {
   function forceState(state: LimitStateName, resetsAtMs?: number | null): void {
     const now = io.now();
     if (resetsAtMs !== undefined) lastResetsAt = resetsAtMs;
-    currentState = state;
+    setState(state);
     if (state === 'limited') {
       sessions.markInterruptedCandidates(db, config.autoContinue.eligibleWindowMinutes * 60_000, now);
     }

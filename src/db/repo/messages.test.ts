@@ -130,6 +130,32 @@ describe('messages repo', () => {
     expect(result.map((m) => m.body)).toEqual(['new']);
   });
 
+  it('maxId returns 0 for an empty table and the highest id otherwise', () => {
+    const db = buildDb();
+    expect(messagesRepo.maxId(db)).toBe(0);
+
+    const now = Date.now();
+    messagesRepo.send(db, { from: 'a', to: 'b', body: 'one', urgent: false, now });
+    const second = messagesRepo.send(db, { from: 'a', to: 'b', body: 'two', urgent: false, now });
+
+    expect(messagesRepo.maxId(db)).toBe(second.id);
+  });
+
+  it('listToOverlordAfter returns only to_name=overlord rows newer than afterId, oldest first', () => {
+    const db = buildDb();
+    const now = Date.now();
+
+    const before = messagesRepo.send(db, { from: 'alpha', to: 'overlord', body: 'too early', urgent: false, now });
+    const notOverlord = messagesRepo.send(db, { from: 'alpha', to: 'beta', body: 'unrelated', urgent: false, now });
+    const reply1 = messagesRepo.send(db, { from: 'alpha', to: 'overlord', body: 'reply one', urgent: false, now });
+    const reply2 = messagesRepo.send(db, { from: 'beta', to: 'overlord', body: 'reply two', urgent: false, now });
+
+    const result = messagesRepo.listToOverlordAfter(db, before.id);
+
+    expect(result.map((m) => m.id)).toEqual([reply1.id, reply2.id]);
+    expect(result.map((m) => m.id)).not.toContain(notOverlord.id);
+  });
+
   it('listRecentInvolving respects limit', () => {
     const db = buildDb();
     const now = Date.now();

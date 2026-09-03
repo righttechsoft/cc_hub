@@ -52,6 +52,16 @@ function buildConfig(opts?: Partial<HubConfig['chatDelivery']>): HubConfig {
     summaries: { enabled: true, model: 'claude-haiku-4-5' },
     attach: { enabled: true, heartbeatMs: 30_000, redactSecrets: true, fenceCodePastes: false },
     athen: { embeddings: false, model: 'Xenova/all-MiniLM-L6-v2' },
+    overlord: { enabled: true, model: 'claude-haiku-4-5', transcriptDays: 30, tailKb: 256 },
+    terminalSpawn: {
+      enabled: true,
+      command: 'wt.exe',
+      args: ['-w', '0', 'new-tab', '--title', '{title}', '--startingDirectory', '{cwd}', 'cmd', '/k', '{launcher}', '--name', '{name}'],
+      maxPerHour: 6,
+      waitForRegisterMs: 60_000,
+      readyQuietMs: 1200,
+      confirmWorkingMs: 15000,
+    },
     notifications: {
       enabled: false,
       permissionRequests: true,
@@ -68,6 +78,7 @@ function buildConfig(opts?: Partial<HubConfig['chatDelivery']>): HubConfig {
       awayThresholdMinutes: 3,
       apns: { keyPath: '', keyId: '', teamId: '', bundleId: 'com.righttechsoft.ccHubMobile', environment: 'production' },
     },
+    sessions: { reapIntervalMs: 600000, staleAfterMinutes: 240, adoptSessionName: true },
     logLevel: 'info',
   };
 }
@@ -374,5 +385,79 @@ describe('startChatDelivery', () => {
     await flushAsync();
 
     expect(events.filter((e) => e.type === 'chat_delivery')).toHaveLength(0);
+  });
+
+  it('prefers injectByName over the cwd-aggregate inject when a wrapper is attached', async () => {
+    const db = buildDb();
+    insertInstance(db, 'sender');
+    const cwd = tmpdir();
+    insertInstance(db, 'recipient', cwd);
+    messagesRepo.send(db, { from: 'sender', to: 'recipient', body: 'hi there', urgent: false, now: Date.now() });
+
+    const inject = vi.fn();
+    const injectByName = vi.fn().mockReturnValue(true);
+    const attach: IAttachRegistry = {
+      register: vi.fn(),
+      unregister: vi.fn(),
+      get: () => ({ ws: {} as never, pid: 1, lastSeen: Date.now() }),
+      inject,
+      injectByName,
+      touch: vi.fn(),
+      count: () => 1,
+      ingestOutput: vi.fn(),
+      getRingB64: () => undefined,
+      listAttached: () => [cwd],
+      setWorking: vi.fn(),
+      isWorking: () => false,
+      stop: vi.fn(),
+    };
+    const runner = fakeRunner();
+    const chatDelivery = startDelivery(db, buildConfig(), silentLogger(), runner, new HubBus(), attach);
+
+    await chatDelivery._tick();
+    await flushAsync();
+
+    expect(injectByName).toHaveBeenCalledWith('recipient', expect.stringContaining('hi there'));
+    expect(inject).not.toHaveBeenCalled();
+    expect(runner.startNew).not.toHaveBeenCalled();
+    expect(messagesRepo.unreadFor(db, 'recipient')).toHaveLength(0);
+  });
+
+  it('does NOT fall back to the cwd-aggregate inject when injectByName is implemented but returns false — avoids misdelivering into a cwd-mate\'s terminal, falls through to headless spawn instead', async () => {
+    const db = buildDb();
+    insertInstance(db, 'sender');
+    const cwd = tmpdir();
+    insertInstance(db, 'recipient', cwd);
+    messagesRepo.send(db, { from: 'sender', to: 'recipient', body: 'hi there', urgent: false, now: Date.now() });
+
+    const inject = vi.fn();
+    const injectByName = vi.fn().mockReturnValue(false); // "recipient" itself has no attached wrapper
+    const attach: IAttachRegistry = {
+      register: vi.fn(),
+      unregister: vi.fn(),
+      // A DIFFERENT (cwd-mate) wrapper is attached at this cwd — get() reports something present,
+      // but it must never be the target of an injection meant for "recipient" specifically.
+      get: () => ({ ws: {} as never, pid: 1, lastSeen: Date.now() }),
+      inject,
+      injectByName,
+      touch: vi.fn(),
+      count: () => 1,
+      ingestOutput: vi.fn(),
+      getRingB64: () => undefined,
+      listAttached: () => [cwd],
+      setWorking: vi.fn(),
+      isWorking: () => false,
+      stop: vi.fn(),
+    };
+    const startNew = vi.fn().mockResolvedValue(fakeRunResult({ code: 0 }));
+    const runner = fakeRunner({ startNew });
+    const chatDelivery = startDelivery(db, buildConfig(), silentLogger(), runner, new HubBus(), attach);
+
+    await chatDelivery._tick();
+    await flushAsync();
+
+    expect(injectByName).toHaveBeenCalledWith('recipient', expect.stringContaining('hi there'));
+    expect(inject).not.toHaveBeenCalled(); // no misdelivery into the cwd-mate's terminal
+    expect(startNew).toHaveBeenCalledTimes(1); // fell through to the normal headless spawn instead
   });
 });

@@ -3,7 +3,7 @@ import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import type Database from 'better-sqlite3';
 import type { Logger } from '../types.js';
 import type { HubBus } from '../core/bus.js';
-import { instanceNameFromCwd } from '../core/identity.js';
+import { INSTANCE_NAME_RE, instanceNameFromCwd, resolveExplicitInstanceName } from '../core/identity.js';
 import * as instances from '../db/repo/instances.js';
 import * as instanceApps from '../db/repo/instanceApps.js';
 import * as sessions from '../db/repo/sessions.js';
@@ -38,6 +38,14 @@ const PEER_RECENCY_MS = 5 * 60 * 1000;
 // approximate unread count, so pass a generous cap instead of adding a dedicated count query.
 const UNREAD_COUNT_LIMIT = 10_000;
 
+// Reserved recipient names with no backing `instances` row. 'overlord' is the admin page's AI
+// Overlord ask-mode sender (src/overlord/overlord.ts + POST /api/v1/admin/overlord-send in
+// apiRoutes.ts) — it messages live instances directly and expects replies back to itself, so
+// chat_send's normal "unknown recipient" rejection must not apply to it. This is safe: chatDelivery
+// (src/chat/chatDelivery.ts) only ever iterates instancesRepo.list(), so a message addressed to a
+// name with no instance row is naturally inert there — nothing tries to spawn/inject a turn for it.
+const RESERVED_RECIPIENTS = new Set(['overlord']);
+
 function notRegistered() {
   return { isError: true as const, content: [{ type: 'text' as const, text: NOT_REGISTERED_TEXT }] };
 }
@@ -53,10 +61,11 @@ export function registerHubTools(server: McpServer, ctx: HubToolsContext): void 
       description:
         'Register this Claude Code instance with cc-hub. Call this once at the start of a session, before ' +
         'using any other cc-hub tool (chat_send, chat_inbox, chat_peers, athen_save, athen_search, athen_get) — ' +
-        'those tools will error until you do. Binds this MCP connection to an instance identity derived from your ' +
-        'working directory (or an explicit name if you supply one), so the hub knows who is asking. Returns ' +
-        'your resolved instance name, how many unread messages are waiting for you, and the list of other ' +
-        'known peer instances. Cheap to call again after a hub restart.',
+        'those tools will error until you do. Binds this MCP connection to an instance identity: an explicit ' +
+        '`name` wins if you supply one; otherwise pass `session_id` (from hook payloads) so a named terminal\'s ' +
+        "agent binds to its own task identity instead of its folder's default; otherwise identity is derived " +
+        'from your working directory. Returns your resolved instance name, how many unread messages are ' +
+        'waiting for you, and the list of other known peer instances. Cheap to call again after a hub restart.',
       inputSchema: {
         cwd: z.string().min(1).describe("Absolute path of this Claude Code instance's working directory."),
         name: z
@@ -71,19 +80,80 @@ export function registerHubTools(server: McpServer, ctx: HubToolsContext): void 
           .optional()
           .describe(
             'The Claude Code session id for this conversation (as seen in hook payloads). Supplying it links ' +
-              "this MCP connection to the hub's session tracking so remote prompts/messages route correctly."
+              "this MCP connection to the hub's session tracking so remote prompts/messages route correctly, " +
+              'and — when that session is already bound to a named instance (a named terminal) — binds this ' +
+              'connection to that same named instance instead of the cwd default.'
           ),
       },
     },
     (args, extra) => {
-      const instanceName = args.name ?? instanceNameFromCwd(ctx.db, args.cwd);
-      instances.upsert(ctx.db, { name: instanceName, cwd: args.cwd, now: Date.now() });
+      let instanceName: string;
+      let resolvedVia: 'name' | 'session' | 'active-named-session' | 'cwd';
+
+      if (args.name) {
+        const requested = args.name.toLowerCase();
+        if (!INSTANCE_NAME_RE.test(requested)) {
+          return {
+            isError: true as const,
+            content: [
+              {
+                type: 'text' as const,
+                text: `Invalid name "${args.name}" — must match ${INSTANCE_NAME_RE.source} (after lowercasing).`,
+              },
+            ],
+          };
+        }
+        const resolved = resolveExplicitInstanceName(ctx.db, requested, args.cwd);
+        if (resolved.collided) {
+          ctx.log.warn('hub_register: instance name collision, disambiguated', {
+            requested,
+            resolved: resolved.name,
+            cwd: args.cwd,
+          });
+        }
+        instanceName = resolved.name;
+        instances.upsertNamed(ctx.db, { name: instanceName, cwd: args.cwd, now: Date.now() });
+        resolvedVia = 'name';
+      } else {
+        // A session already bound to an instance (by SessionStart, via CC_HUB_NAME) is
+        // authoritative for THAT session's identity — a named terminal's session is bound to its
+        // named instance there, and re-deriving from cwd here would collapse it back into the
+        // folder's default instance (see CLAUDE.md's Identity model bug writeup).
+        const boundInstanceName = args.session_id
+          ? sessions.getJoined(ctx.db, args.session_id)?.instance_name ?? undefined
+          : undefined;
+
+        if (boundInstanceName) {
+          instanceName = boundInstanceName;
+          resolvedVia = 'session';
+        } else {
+          // Tier 3: the sole active session in this cwd bound to a NAMED instance (see
+          // sessions.soleActiveNamedInstanceForCwd's doc comment / CLAUDE.md's Identity model) —
+          // covers a dispatched agent that calls hub_register with only cwd, without relying on
+          // the model to cooperate by passing session_id/name. Ambiguous (0 or >1 match) falls
+          // through to the cwd default below.
+          const soleActive = sessions.soleActiveNamedInstanceForCwd(ctx.db, args.cwd);
+          if (soleActive) {
+            instanceName = soleActive.name;
+            resolvedVia = 'active-named-session';
+          } else {
+            instanceName = instanceNameFromCwd(ctx.db, args.cwd);
+            instances.upsert(ctx.db, { name: instanceName, cwd: args.cwd, now: Date.now() });
+            resolvedVia = 'cwd';
+          }
+        }
+      }
 
       if (args.session_id && extra.sessionId) {
         sessions.bindMcp(ctx.db, args.session_id, extra.sessionId);
       }
 
       ctx.bind({ instanceName, cwd: args.cwd, ccSessionId: args.session_id });
+      ctx.log.debug(`hub_register: bound via ${resolvedVia}`, {
+        instanceName,
+        cwd: args.cwd,
+        session_id: args.session_id,
+      });
 
       const unreadCount = messages.unreadFor(ctx.db, instanceName, UNREAD_COUNT_LIMIT).length;
       const peers = instances.list(ctx.db).map((i) => ({ name: i.name, cwd: i.cwd }));
@@ -117,7 +187,7 @@ export function registerHubTools(server: McpServer, ctx: HubToolsContext): void 
       const identity = ctx.getIdentity();
       if (!identity) return notRegistered();
 
-      if (args.to) {
+      if (args.to && !RESERVED_RECIPIENTS.has(args.to)) {
         const target = instances.byName(ctx.db, args.to);
         if (!target) {
           const known = instances.list(ctx.db).map((i) => i.name);
@@ -245,7 +315,9 @@ export function registerHubTools(server: McpServer, ctx: HubToolsContext): void 
         };
       }
 
-      const instance = instances.byCwd(ctx.db, identity.cwd);
+      // Looked up by the identity's resolved name, not cwd — several instances can share a cwd
+      // (named per-task agents), and byName is the one that always finds THIS caller's own row.
+      const instance = instances.byName(ctx.db, identity.instanceName);
       if (!instance) return notRegistered();
 
       const now = Date.now();
@@ -294,7 +366,7 @@ export function registerHubTools(server: McpServer, ctx: HubToolsContext): void 
         };
       }
 
-      const instance = instances.byCwd(ctx.db, identity.cwd);
+      const instance = instances.byName(ctx.db, identity.instanceName);
       if (!instance) return notRegistered();
 
       instanceApps.replaceAll(ctx.db, instance.id, args.apps, Date.now());

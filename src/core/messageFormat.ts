@@ -16,12 +16,16 @@ function formatMessageLine(msg: MessageRow): string {
 }
 
 // SessionStart hook stdout: nudges the instance to check its inbox (if any) and to prefer the
-// shared knowledge base over solving problems from scratch.
-export function renderSessionStartBanner(unread: number): string {
+// shared knowledge base over solving problems from scratch. `named` instances (a per-task
+// cc-attach terminal, not a folder's default identity) also get told their own name — otherwise
+// an agent in a named terminal has no way to know it, and might call hub_register without
+// session_id and fall back to the folder default (see CLAUDE.md's Identity model bug writeup).
+export function renderSessionStartBanner(unread: number, instanceName?: string): string {
+  const identityLine = instanceName ? ` You are instance '${instanceName}'.` : '';
   if (unread <= 0) {
-    return `[cc-hub] ${KB_LINE}`;
+    return `[cc-hub]${identityLine} ${KB_LINE}`;
   }
-  return `[cc-hub] You have ${unread} unread message(s) from other Claude instances — call chat_inbox and show the user what arrived. ${KB_LINE}`;
+  return `[cc-hub] You have ${unread} unread message(s) from other Claude instances — call chat_inbox and show the user what arrived.${identityLine} ${KB_LINE}`;
 }
 
 // UserPromptSubmit hook stdout: renders unread messages as injected context. Injected context is

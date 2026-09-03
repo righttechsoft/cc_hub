@@ -10,17 +10,46 @@ import { delimiter, dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseEnv } from 'node:util';
 import WebSocket from 'ws'; // Node global WebSocket cannot set/inspect readyState the same way
+import { INSTANCE_NAME_RE } from '../core/identity.js'; // type-only DB import inside — erased at
+// build time, so this pulls in no native binding (see CLAUDE.md's node-pty isolation gotcha).
 import { readClipboardForPaste } from './clipboard.js';
 import { bracketedPaste } from './injection.js';
-import { createOutputScanner, type NoticeKind } from './outputScanner.js';
+import { parseNameArg } from './nameArg.js';
+import { createOutputScanner, type NoticeKind, type OutputScanner } from './outputScanner.js';
 import { applyPasteHygiene } from './pasteHygiene.js';
 import { decodeSnippetEvents, INITIAL_SNIPPET_STATE, sanitizeSnippetsConfig, stepSnippet, type SnippetState } from './snippets.js';
+import { createTopBar, shiftInputRows, titleFileName } from './topBar.js';
+
+// Named per-task agent identity (cc-attach --name <value>, or CC_HUB_NAME env as a fallback when
+// --name is absent — an explicit flag always wins). Consumed here so claude itself never sees
+// --name; the resolved, validated name (lowercased) is threaded into the child's env (so hooks/
+// statusline inherit it), the /attach register frame, and the top-bar status file key.
+const { name: nameArgValue, rest: claudeArgs } = parseNameArg(process.argv.slice(2));
+const rawInstanceName = nameArgValue ?? process.env.CC_HUB_NAME;
+let instanceName: string | undefined;
+if (rawInstanceName) {
+  const lowered = rawInstanceName.toLowerCase();
+  if (!INSTANCE_NAME_RE.test(lowered)) {
+    process.stderr.write(
+      `cc-attach: invalid --name "${rawInstanceName}" — must match ${INSTANCE_NAME_RE.source} (after lowercasing)\n`
+    );
+    process.exit(1);
+  }
+  instanceName = lowered;
+}
 
 // Diagnostic trace for the smart-paste path — appended to %TEMP%/cc-attach-debug.log. Always logs
 // the paste trigger + clipboard outcome (low volume); CC_HUB_PASTE_DEBUG=1 additionally logs every
 // raw stdin chunk as hex, to see exactly what the terminal sends on Ctrl+V. Best-effort, never throws.
 const DEBUG_LOG = join(tmpdir(), 'cc-attach-debug.log');
 const pasteDebug = process.env.CC_HUB_PASTE_DEBUG === '1';
+
+// Pinned top status row: the pty runs one row short and row 1 of the real terminal permanently
+// shows the statusline mirror ("model · effort · ctx% · repo", written to a per-cwd temp file by
+// the user's statusline script). src/attach/topBar.ts shifts the child's absolute rows down by
+// one and shields row 1 with a scroll margin. CC_HUB_NO_TOPBAR=1 disables it (full-size pty,
+// byte-identical passthrough). Auto-disabled on very short terminals.
+const topBarEnabled = process.env.CC_HUB_NO_TOPBAR !== '1' && (process.stdout.rows || 24) >= 6;
 function dlog(msg: string): void {
   try {
     appendFileSync(DEBUG_LOG, `${new Date().toISOString()} ${msg}\n`);
@@ -61,20 +90,26 @@ function readHubConfig(): {
   redactSecrets: boolean;
   fenceCodePastes: boolean;
   snippets: Record<string, string>;
+  readyQuietMs: number;
 } {
   try {
     const root = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
     const c = JSON.parse(readFileSync(join(root, 'config.json'), 'utf8')) as Record<string, unknown>;
     const attach = (c.attach && typeof c.attach === 'object' ? c.attach : {}) as Record<string, unknown>;
+    const terminalSpawn = (c.terminalSpawn && typeof c.terminalSpawn === 'object' ? c.terminalSpawn : {}) as Record<
+      string,
+      unknown
+    >;
     return {
       claudePath: typeof c.claudePath === 'string' ? c.claudePath : undefined,
       port: typeof c.port === 'number' ? c.port : undefined,
       redactSecrets: typeof attach.redactSecrets === 'boolean' ? attach.redactSecrets : true,
       fenceCodePastes: typeof attach.fenceCodePastes === 'boolean' ? attach.fenceCodePastes : false,
       snippets: sanitizeSnippetsConfig(attach.snippets),
+      readyQuietMs: typeof terminalSpawn.readyQuietMs === 'number' ? terminalSpawn.readyQuietMs : 1200,
     };
   } catch {
-    return { redactSecrets: true, fenceCodePastes: false, snippets: {} };
+    return { redactSecrets: true, fenceCodePastes: false, snippets: {}, readyQuietMs: 1200 };
   }
 }
 
@@ -163,7 +198,12 @@ try {
 } catch {
   // no .env in this dir — fine
 }
-const childEnv = { ...process.env, ...fileEnv, CC_HUB_ATTACHED: '1' };
+const childEnv = {
+  ...process.env,
+  ...fileEnv,
+  CC_HUB_ATTACHED: '1',
+  ...(instanceName ? { CC_HUB_NAME: instanceName } : {}),
+};
 
 // Minimal node-pty surface used here — kept local instead of depending on node-pty's own types
 // so `tsc --noEmit` passes even when node-pty (an optionalDependency, loaded only via dynamic
@@ -224,10 +264,10 @@ async function main(): Promise<void> {
   const wantConptyDll = useConpty && process.platform === 'win32' && process.env.CC_HUB_NO_CONPTY_DLL !== '1';
 
   const spawnPty = (withDll: boolean): PtyProcess =>
-    ptyModule.spawn(claudePath, process.argv.slice(2), {
+    ptyModule.spawn(claudePath, claudeArgs, {
       name: 'xterm-256color',
       cols: process.stdout.columns || 80,
-      rows: process.stdout.rows || 24,
+      rows: (process.stdout.rows || 24) - (topBarEnabled ? 1 : 0),
       cwd,
       env: childEnv,
       useConpty,
@@ -249,6 +289,28 @@ async function main(): Promise<void> {
   const backend = process.platform !== 'win32' ? 'conpty' : !useConpty ? 'winpty' : usedDll ? 'conpty+dll' : 'conpty';
   process.stderr.write(`cc-attach: pty backend = ${backend}\n`);
 
+  // Top-bar setup + status poll. The status file is best-effort: missing just means the bar shows
+  // the folder name until the first statusline render mirrors the real line.
+  const topBar = topBarEnabled ? createTopBar(process.stdout.rows || 24, process.stdout.columns || 80) : null;
+  const statusFile = join(tmpdir(), titleFileName(cwd, instanceName));
+  if (topBar) {
+    process.stdout.write(topBar.initSeq());
+    const seed = topBar.setStatus(cwd.replace(/[\\/]+$/, '').split(/[\\/]/).pop() || cwd);
+    if (seed) process.stdout.write(seed);
+    let lastMtime = 0;
+    setInterval(() => {
+      try {
+        const mtime = statSync(statusFile).mtimeMs;
+        if (mtime === lastMtime) return;
+        lastMtime = mtime;
+        const paint = topBar.setStatus(readFileSync(statusFile, 'utf8'));
+        if (paint) process.stdout.write(paint);
+      } catch {
+        // no status file yet — keep whatever's showing
+      }
+    }, 2000).unref();
+  }
+
   function restoreTerminal(): void {
     try {
       process.stdin.setRawMode?.(false);
@@ -256,6 +318,7 @@ async function main(): Promise<void> {
       // ignore — stdin may not be a TTY
     }
     process.stdin.pause();
+    if (topBar) process.stdout.write(topBar.resetSeq());
   }
 
   process.stdin.setRawMode?.(true);
@@ -278,6 +341,10 @@ async function main(): Promise<void> {
     if (pasteDebug) dlog(`stdin chunk (${d.length}B): ${d.toString('hex')}`);
     let s = d.toString('binary');
     let paste = false;
+
+    // Outer→child row shift for coordinate-carrying stdin sequences (CPR replies, SGR mouse) —
+    // see shiftInputRows in topBar.ts. Without the mouse shift, clicks select one row off.
+    if (topBarEnabled) s = shiftInputRows(s);
 
     s = s.replace(WIN32_CTRL_V, (_m, kd: string) => {
       if (kd === '1') paste = true;
@@ -351,22 +418,38 @@ async function main(): Promise<void> {
     if (cols === lastCols && rows === lastRows) return;
     lastCols = cols;
     lastRows = rows;
-    pty.resize(cols, rows);
+    if (topBar) process.stdout.write(topBar.resize(rows, cols));
+    pty.resize(cols, rows - (topBarEnabled ? 1 : 0));
   });
 
-  const attach = connectAttach(pty);
+  // Late-bound: connectAttach needs working/ready-state getters for its post-register resync, but
+  // the scanner (which owns that state) is only created after connectAttach — see scannerRef below.
+  let scannerRef: OutputScanner | null = null;
+  const attach = connectAttach(pty, {
+    isWorking: () => scannerRef?.isWorking() ?? false,
+    isReady: () => scannerRef?.isReady() ?? false,
+  });
   // Watches the same output for claude's "esc to interrupt" running indicator and reports
   // debounced working/idle transitions to the hub, so it can suppress false "needs input"
-  // notifications during subagent (Task) work — see src/attach/outputScanner.ts.
+  // notifications during subagent (Task) work — see src/attach/outputScanner.ts. Also watches for
+  // claude's TUI-ready boot sequence (alt screen + bracketed paste, then a quiet period) so the
+  // hub knows when it's actually safe to inject a dispatched task — registration over /attach
+  // happens long before the TUI can accept input and must never be treated as readiness.
   const scanner = createOutputScanner((on) => attach.sendWorking(on), {
     onNotice: (kind, text) => attach.sendNotice(kind, text),
+    onReady: () => attach.sendReady(),
+    readyQuietMs: hubConfig.readyQuietMs,
   });
+  scannerRef = scanner;
   // pty.onData is the local terminal's only output source — write it straight through, then feed
   // the hub's mirror on a LATER tick. Doing the coalescer/WS work inline would add latency between
   // the child's output chunks and the real terminal, making ConPTY's output burstier and racing
   // the echo of freshly-typed input (garbled first keystroke). setImmediate preserves order.
+  // The top-bar translation runs inline (a few regex passes, not a hub round-trip) so the child's
+  // absolute row coordinates land one row down from where it thinks they are; the raw, untranslated
+  // `d` still feeds the mirror/scanner.
   pty.onData((d) => {
-    process.stdout.write(d);
+    process.stdout.write(topBar ? topBar.translate(d) : d);
     scanWin32InputMode(d);
     setImmediate(() => {
       scanner.feed(d);
@@ -405,8 +488,15 @@ async function main(): Promise<void> {
 // crash the wrapper: a hub that's down or unreachable just means no injection, terminal still
 // works normally.
 function connectAttach(
-  pty: PtyProcess
-): { stop(): void; feedOutput(data: string): void; sendWorking(on: boolean): void; sendNotice(kind: NoticeKind, text: string): void } {
+  pty: PtyProcess,
+  state: { isWorking(): boolean; isReady(): boolean }
+): {
+  stop(): void;
+  feedOutput(data: string): void;
+  sendWorking(on: boolean): void;
+  sendNotice(kind: NoticeKind, text: string): void;
+  sendReady(): void;
+} {
   const wsUrl = hubUrl.replace(/^http/, 'ws') + '/attach';
 
   // Coalescing rule (pinned protocol): flush when buffered >= 8192 bytes OR 16ms after the first
@@ -557,7 +647,12 @@ function connectAttach(
       warnedThisOutage = false;
       displaced = false;
       try {
-        socket.send(JSON.stringify({ t: 'register', cwd, pid: process.pid }));
+        socket.send(JSON.stringify({ t: 'register', cwd, pid: process.pid, ...(instanceName ? { name: instanceName } : {}) }));
+        // Resync after (re)connect — the hub's working/ready flags are in-memory and a hub restart
+        // would otherwise strand a mid-turn session at false (working) or, for a wrapper that had
+        // already finished booting, permanently unready (ready only ever fires once per scanner).
+        socket.send(JSON.stringify({ t: 'working', on: state.isWorking() }));
+        if (state.isReady()) socket.send(JSON.stringify({ t: 'ready' }));
       } catch {
         // ignore — next heartbeat tick or a close/error will trigger reconnect
       }
@@ -622,6 +717,16 @@ function connectAttach(
       if (!ws || ws.readyState !== WebSocket.OPEN) return;
       try {
         ws.send(JSON.stringify({ t: 'notice', kind, text }));
+      } catch {
+        // ignore
+      }
+    },
+    // Best-effort — if the socket is down when the scanner fires onReady, the open-handler resync
+    // above (state.isReady()) catches it up once the wrapper reconnects.
+    sendReady(): void {
+      if (!ws || ws.readyState !== WebSocket.OPEN) return;
+      try {
+        ws.send(JSON.stringify({ t: 'ready' }));
       } catch {
         // ignore
       }

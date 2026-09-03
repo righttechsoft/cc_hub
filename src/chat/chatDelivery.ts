@@ -115,13 +115,21 @@ export function startChatDelivery(deps: ChatDeliveryDeps): ChatDelivery {
         }
 
         // Attached wrapper terminal for this cwd (see src/attach/) — inject straight into the
-        // real interactive session instead of spawning a headless one. markRead runs
-        // synchronously right after a successful inject, before the injected turn's own
-        // UserPromptSubmit hook round-trips to /hooks/event, so it's already read by the time
-        // that hook checks (see CLAUDE.md's markRead-ordering note). No 'chat_delivery' bus event
-        // here — the turn is now visible in the terminal itself, so there's nothing to toast.
+        // real interactive session instead of spawning a headless one. Prefer name-keyed
+        // injection so this instance's own mail lands in ITS terminal, never a cwd-mate's (named
+        // per-task agents can share a cwd): when injectByName is implemented, its true/false
+        // result is final — no cwd-aggregate fallback on false, which could misdeliver into a
+        // sibling's terminal. The cwd-aggregate `inject` is only used when injectByName itself is
+        // unavailable (older/simpler registries, e.g. test fakes). markRead runs synchronously right after a successful
+        // inject, before the injected turn's own UserPromptSubmit hook round-trips to
+        // /hooks/event, so it's already read by the time that hook checks (see CLAUDE.md's
+        // markRead-ordering note). No 'chat_delivery' bus event here — the turn is now visible in
+        // the terminal itself, so there's nothing to toast.
         if (attach.get(cwd)) {
-          if (attach.inject(cwd, renderChatDeliveryPrompt(batch))) {
+          const injected =
+            attach.injectByName?.(instanceName, renderChatDeliveryPrompt(batch)) ??
+            attach.inject(cwd, renderChatDeliveryPrompt(batch));
+          if (injected) {
             messagesRepo.markRead(db, messageIds, instanceName, Date.now());
             log.info('chatDelivery: injected into attached terminal', {
               instance: instanceName,

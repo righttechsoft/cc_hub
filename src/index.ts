@@ -11,6 +11,8 @@ import { openDb } from './db/db.js';
 import { HubBus } from './core/bus.js';
 import * as eventsRepo from './db/repo/events.js';
 import * as messagesRepo from './db/repo/messages.js';
+import * as instancesRepo from './db/repo/instances.js';
+import * as sessionsRepo from './db/repo/sessions.js';
 import { ClaudeRunner } from './runner/claudeRunner.js';
 import { PromptDelivery } from './runner/promptDelivery.js';
 import { AttachRegistry } from './attach/attachRegistry.js';
@@ -22,9 +24,13 @@ import { buildApiRoutes } from './http/apiRoutes.js';
 import { buildApp } from './http/app.js';
 import { startRelayClient } from './relay/relayClient.js';
 import { startChatDelivery } from './chat/chatDelivery.js';
+import { startSessionReaper } from './sessions/reaper.js';
 import { startMessageSummarizer } from './chat/messageSummarizer.js';
 import { createEmbedder } from './kb/embedder.js';
 import { createAthen } from './kb/athen.js';
+import { createOverlord } from './overlord/overlord.js';
+import { createTerminalSpawner } from './spawn/terminalSpawner.js';
+import { createDispatcher } from './spawn/dispatcher.js';
 import { startDesktopNotifier } from './notify/desktopNotifier.js';
 import { startAwayDetector } from './notify/awayDetector.js';
 import { createApnsSender } from './notify/apns.js';
@@ -56,6 +62,8 @@ const chatDelivery = config.chatDelivery.enabled
   ? startChatDelivery({ db, log, config, runner, bus, attach })
   : undefined;
 
+const sessionReaper = startSessionReaper({ db, log, config, attach, runner });
+
 const messageSummarizer = startMessageSummarizer({ db, bus, config, log });
 
 const desktopNotifier = config.notifications.enabled
@@ -77,6 +85,10 @@ const hooksRoutes = buildHooksRoutes({
   delivery,
   getWatcher: () => watcher,
   runner,
+  attach,
+  // `gateway` is constructed further below (after chat/athen wiring) — deferred via a getter,
+  // same pattern as getWatcher above, so this doesn't need a reorder.
+  getGateway: () => gateway,
 });
 
 const pokeChatDelivery = chatDelivery ? () => chatDelivery.pokeNow() : undefined;
@@ -85,6 +97,30 @@ const embedder = config.athen.embeddings
   ? createEmbedder({ config, log, modelCacheDir: join(projectRoot, 'data', 'models') })
   : undefined;
 const athen = createAthen({ db, log, embedder });
+
+// Ask-mode liveness: live = an open cc-attach terminal for the cwd, OR any instance at that cwd
+// (default or a named sibling — several can share one cwd, see src/core/identity.ts) has a
+// mid-turn session — anything else would only ever be reached via a fresh headless spawn.
+function isLiveInstance(cwd: string): boolean {
+  if (attach.get(cwd) !== undefined) return true;
+  return instancesRepo.listByCwd(db, cwd).some((instance) => sessionsRepo.hasActiveSession(db, instance.id));
+}
+
+// Dispatch-mode liveness: whether a cc-attach wrapper is currently attached under this instance's
+// resolved name (falling back to its cwd — see attachRegistry.ts's cwd-vs-name aggregation), and
+// whether it's actively working right now. decideDispatch (src/spawn/dispatcher.ts) only reuses an
+// attached-and-idle candidate.
+function getInstanceLiveness(cwd: string, name: string): { attached: boolean; working: boolean } {
+  const client = attach.getByName?.(name) ?? attach.get(cwd);
+  return { attached: client !== undefined, working: attach.isWorking(cwd) };
+}
+
+const overlord = config.overlord.enabled
+  ? createOverlord({ db, config, log, isLiveInstance, getInstanceLiveness })
+  : undefined;
+
+const terminalSpawner = config.terminalSpawn.enabled ? createTerminalSpawner({ config, log }) : undefined;
+const dispatcher = terminalSpawner ? createDispatcher({ attach, spawner: terminalSpawner, config, db, log }) : undefined;
 
 const gateway = new McpGateway({ db, bus, log, athen, pokeChatDelivery });
 
@@ -101,6 +137,9 @@ const apiRoutes = buildApiRoutes({
   startedAt,
   pokeChatDelivery,
   attach,
+  overlord,
+  dispatcher,
+  gateway,
 });
 
 const { app, injectWebSocket } = buildApp({
@@ -157,6 +196,7 @@ function shutdown(signal: string): void {
   watcher?.stop();
   relay?.stop();
   chatDelivery?.stop();
+  sessionReaper.stop();
   messageSummarizer.stop();
   desktopNotifier?.stop();
   pushNotifier?.stop();

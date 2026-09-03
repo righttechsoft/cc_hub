@@ -7,6 +7,7 @@ import type Database from 'better-sqlite3';
 import type {
   HookPayload,
   HubConfig,
+  IAttachRegistry,
   IClaudeRunner,
   ILimitWatcher,
   IPromptDelivery,
@@ -15,10 +16,12 @@ import type {
   MessageRow,
   PermissionRow,
   PermissionStatus,
+  RenameBindingSource,
   SessionRow,
 } from '../types.js';
 import type { HubBus } from '../core/bus.js';
-import { instanceNameFromCwd } from '../core/identity.js';
+import { applyInstanceRename, instanceNameFromCwd, resolveExplicitInstanceName } from '../core/identity.js';
+import { slugifySessionName } from '../core/sessionNameIdentity.js';
 import {
   renderChatDeliveredFyi,
   renderInboxContext,
@@ -39,6 +42,11 @@ export interface HooksRoutesDeps {
   delivery: IPromptDelivery;
   getWatcher: () => ILimitWatcher | undefined;
   runner: IClaudeRunner;
+  attach: IAttachRegistry;
+  // Lazy getter (same pattern as getWatcher above) — the MCP gateway is constructed after
+  // hooksRoutes in src/index.ts's composition order, so this defers the reference to call time
+  // instead of forcing a reorder. See src/core/identity.ts's applyInstanceRename.
+  getGateway: () => RenameBindingSource | undefined;
 }
 
 interface EventCtx {
@@ -71,23 +79,42 @@ function composePermissionDecision(status: PermissionStatus, message: string | n
   };
 }
 
+const MAX_SESSION_NAME_LENGTH = 200;
+
 export function buildHooksRoutes(deps: HooksRoutesDeps): Hono {
-  const { config, db, bus, log, delivery, getWatcher, runner } = deps;
+  const { config, db, bus, log, delivery, getWatcher, runner, attach, getGateway } = deps;
   const app = new Hono();
 
   // Per-session throttle for PostToolUse recording; lives for the process lifetime of this route.
   const postToolUseLastRecordedAt = new Map<string, number>();
 
+  function explicitNameOf(payload: HookPayload): string | undefined {
+    return typeof payload.name === 'string' && payload.name.length > 0 ? payload.name : undefined;
+  }
+
+  // Resolves the instance name for events that only report state (Notification/Stop/
+  // PostToolUse/SessionEnd) — never creates a row (SessionStart/UserPromptSubmit's
+  // ensureInstanceAndSession does that). Priority: the session's already-bound instance (set at
+  // SessionStart via the same explicit-name rule) is authoritative and must win over a fresh
+  // cwd/name lookup — now that several instances can share one cwd (named siblings), re-deriving
+  // "the" instance for a cwd from scratch on every event would be ambiguous and could misroute a
+  // named session's urgent-unread/Stop-block check to the wrong instance's inbox. cwd/name lookups
+  // are only a fallback for the (rare) case no session row exists yet.
   function resolveCtx(payload: HookPayload): EventCtx {
     const now = Date.now();
     const sessionId = typeof payload.session_id === 'string' ? payload.session_id : undefined;
     const cwd = typeof payload.cwd === 'string' ? payload.cwd : undefined;
+    const explicitName = explicitNameOf(payload);
 
     let instanceName: string | null = null;
-    if (cwd) {
-      instanceName = instancesRepo.byCwd(db, cwd)?.name ?? null;
-    } else if (sessionId) {
+    if (sessionId) {
       instanceName = sessionsRepo.getJoined(db, sessionId)?.instance_name ?? null;
+    }
+    if (!instanceName && explicitName) {
+      instanceName = instancesRepo.byName(db, explicitName)?.name ?? null;
+    }
+    if (!instanceName && cwd) {
+      instanceName = instancesRepo.byCwd(db, cwd)?.name ?? null;
     }
 
     return { sessionId, cwd, now, instanceName };
@@ -96,8 +123,26 @@ export function buildHooksRoutes(deps: HooksRoutesDeps): Hono {
   function ensureInstanceAndSession(payload: HookPayload, now: number): { name: string; inst: InstanceRow; sess: SessionRow } {
     const cwd = String(payload.cwd ?? '');
     const sessionId = String(payload.session_id ?? '');
-    const name = instanceNameFromCwd(db, cwd);
-    const inst = instancesRepo.upsert(db, { cwd, name, now });
+    const explicitName = explicitNameOf(payload);
+
+    let name: string;
+    let inst: InstanceRow;
+    if (explicitName) {
+      const resolved = resolveExplicitInstanceName(db, explicitName, cwd);
+      if (resolved.collided) {
+        log.warn('hooksRoutes: instance name collision, disambiguated', {
+          requested: explicitName,
+          resolved: resolved.name,
+          cwd,
+        });
+      }
+      name = resolved.name;
+      inst = instancesRepo.upsertNamed(db, { cwd, name, now });
+    } else {
+      name = instanceNameFromCwd(db, cwd);
+      inst = instancesRepo.upsert(db, { cwd, name, now });
+    }
+
     const sess = sessionsRepo.upsertFromHook(db, {
       sessionId,
       instanceId: inst.id,
@@ -111,7 +156,7 @@ export function buildHooksRoutes(deps: HooksRoutesDeps): Hono {
   function handleSessionStart(payload: HookPayload): string {
     const now = Date.now();
     const cwd = String(payload.cwd ?? '');
-    const { name, sess } = ensureInstanceAndSession(payload, now);
+    const { name, inst, sess } = ensureInstanceAndSession(payload, now);
 
     // Turn hasn't started yet — upsertFromHook's default status doesn't matter, force idle.
     sessionsRepo.setStatus(db, sess.id, 'idle', now);
@@ -136,7 +181,7 @@ export function buildHooksRoutes(deps: HooksRoutesDeps): Hono {
     bus.emit({ type: 'session_status', sessionId: sess.id, status: 'idle' });
 
     const unread = messagesRepo.unreadFor(db, name).length;
-    return renderSessionStartBanner(unread);
+    return renderSessionStartBanner(unread, inst.named ? name : undefined);
   }
 
   function handleUserPromptSubmit(payload: HookPayload): string | undefined {
@@ -406,6 +451,62 @@ export function buildHooksRoutes(deps: HooksRoutesDeps): Hono {
       log.error('hooksRoutes: handler failed', { error: err instanceof Error ? err.message : String(err) });
       return c.json({});
     }
+  });
+
+  // Session names (see CLAUDE.md's "Session names" subsection): the statusline reports what
+  // Claude Code's `/name <x>` sets — or CC's own auto-generated conversation title, the payload
+  // carries no flag telling the two apart — every time it changes (compare-first, on the statusline
+  // side). Considers adopting a short, deliberate-looking name as the instance's own identity.
+  function maybeAdoptSessionName(inst: InstanceRow, sessionName: string): void {
+    if (!config.sessions.adoptSessionName) return;
+
+    const slug = slugifySessionName(sessionName);
+    if (!slug) return; // looks like an auto-generated sentence-title, not a deliberate label
+    if (slug === inst.name) return;
+
+    // Never silently override an identity the user set explicitly (cc-attach --name / hub_register
+    // name / the admin ✎ rename) — only a still-cwd-derived default, or one this same mechanism
+    // already adopted before, is fair game for a further adoption.
+    const canAdopt = inst.named === 0 || inst.name_source === 'session';
+    if (!canAdopt) return;
+
+    const collision = instancesRepo.byName(db, slug);
+    if (collision && collision.id !== inst.id) {
+      log.info('sessions: adoption skipped, name collision', { from: inst.name, to: slug });
+      return;
+    }
+
+    applyInstanceRename({ db, attach, gateway: getGateway() }, inst.id, inst.name, slug, 'session');
+    instancesRepo.markNamed(db, inst.id);
+    log.info('sessions: adopted session name as instance identity', { from: inst.name, to: slug });
+  }
+
+  // Fully fail-soft (see file header): always 204, no body, regardless of outcome — the statusline
+  // must never see an error and must never block on this call.
+  app.post('/session-name', async (c) => {
+    try {
+      const body = await c.req.json<Record<string, unknown>>();
+      const sessionId = typeof body.session_id === 'string' ? body.session_id : '';
+      const rawName = typeof body.name === 'string' ? body.name : '';
+      const name = rawName.trim().slice(0, MAX_SESSION_NAME_LENGTH);
+
+      if (!sessionId || !name) return c.body(null, 204);
+
+      const now = Date.now();
+      const sess = sessionsRepo.get(db, sessionId);
+      // SessionStart creates the row; if it hasn't fired yet, ignore gracefully — the statusline's
+      // compare-first cache only suppresses UNCHANGED values, so a dropped report here retries on
+      // the next render once the value changes (or the session starts and re-renders).
+      if (!sess) return c.body(null, 204);
+
+      sessionsRepo.setSessionName(db, sessionId, name, now);
+
+      const inst = instancesRepo.byId(db, sess.instance_id);
+      if (inst) maybeAdoptSessionName(inst, name);
+    } catch (err) {
+      log.warn('hooksRoutes: session-name handler failed', { error: err instanceof Error ? err.message : String(err) });
+    }
+    return c.body(null, 204);
   });
 
   return app;

@@ -29,6 +29,14 @@ async function main() {
   const raw = await readStdin();
   const payload = JSON.parse(raw);
 
+  // Named per-task agent identity (cc-attach --name / CC_HUB_NAME): the wrapper sets this in the
+  // claude child's env, so it's inherited here. Included on every event (not just SessionStart) so
+  // the hub can resolve/re-resolve the right instance regardless of which event arrives first.
+  if (process.env.CC_HUB_NAME && typeof payload === 'object' && payload !== null && payload.name === undefined) {
+    payload.name = process.env.CC_HUB_NAME;
+  }
+  const bodyToSend = payload.name !== undefined ? JSON.stringify(payload) : raw;
+
   const url = process.env.CC_HUB_URL || 'http://127.0.0.1:4270';
   // install-hooks.mjs derives this from config.json's hooks.permissionWaitMs (+5s margin) and
   // passes it as argv[2] on the installed PermissionRequest hook command; CC_HUB_PERMISSION_TIMEOUT_MS
@@ -44,7 +52,7 @@ async function main() {
     const res = await fetch(url + '/hooks/event', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: raw,
+      body: bodyToSend,
       signal: controller.signal,
     });
 

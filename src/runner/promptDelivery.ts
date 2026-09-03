@@ -45,16 +45,26 @@ export class PromptDelivery implements IPromptDelivery {
     // Idle instance with an attached wrapper terminal (see src/attach/) — inject the prompt
     // straight into the real interactive session instead of spawning a separate headless one.
     // limit_watcher stays on the headless path for v1 (guard below) to avoid perturbing the
-    // 'continuing' status state machine. If the wrapper has vanished, attach.inject() returns
-    // false and this falls through to the existing queue/spawn logic unchanged.
-    if (
+    // 'continuing' status state machine. Prefer name-keyed injection (session.instance_name) so a
+    // named instance's mail lands in ITS terminal, never a different sibling's that happens to
+    // share its cwd: when injectByName is IMPLEMENTED, its true/false result is final (no
+    // cwd-aggregate fallback — that could misdeliver into a cwd-mate's terminal); the
+    // cwd-aggregate `inject` is only used when injectByName itself is unavailable (older/simpler
+    // registries, e.g. test fakes, that predate named identities) or no instance name is known.
+    // If no wrapper is attached at all, both return false and this falls through to the existing
+    // queue/spawn logic unchanged.
+    const idleGate =
       source !== 'limit_watcher' &&
-      attach.get(session.cwd) &&
+      attach.get(session.cwd) !== undefined &&
       session.status !== 'active' &&
       !runner.isRunning(sessionId) &&
-      !runner.runningCwd(session.cwd) &&
-      attach.inject(session.cwd, prompt)
-    ) {
+      !runner.runningCwd(session.cwd);
+    const injected =
+      idleGate &&
+      (session.instance_name
+        ? (attach.injectByName?.(session.instance_name, prompt) ?? attach.inject(session.cwd, prompt))
+        : attach.inject(session.cwd, prompt));
+    if (injected) {
       const row = promptsRepo.enqueue(db, {
         sessionId,
         prompt,

@@ -65,7 +65,12 @@ export function parseUsage(json: unknown): Usage {
   }
   if (pct === null) pct = extractNumber(fiveHour);
   if (pct === null) throw new UsageError('parse', 'no pct in five_hour');
-  if (pct <= 1.0) pct *= 100;
+  // The live endpoint returns five_hour.utilization as an INTEGER PERCENT (0-100), not a
+  // fraction. A reading of exactly 1 means 1% (routine right after a 5h window reset) and must
+  // NOT be scaled — the old `<= 1 -> *100` heuristic turned it into 100, causing false "limit
+  // reached" episodes (proven via limit_events raw payloads: every `limited` row had raw
+  // five_hour.utilization = 1). Only strict fractions (0 < pct < 1) are fraction-form.
+  if (pct > 0 && pct < 1) pct *= 100;
 
   let resetsAtMs: number | null = null;
   if (fiveHourObj) {

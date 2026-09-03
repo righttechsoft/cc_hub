@@ -40,6 +40,16 @@ function buildConfig(opts?: Partial<HubConfig['summaries']>): HubConfig {
     summaries: { enabled: true, model: 'claude-haiku-4-5', ...opts },
     attach: { enabled: true, heartbeatMs: 30_000, redactSecrets: true, fenceCodePastes: false },
     athen: { embeddings: false, model: 'Xenova/all-MiniLM-L6-v2' },
+    overlord: { enabled: true, model: 'claude-haiku-4-5', transcriptDays: 30, tailKb: 256 },
+    terminalSpawn: {
+      enabled: true,
+      command: 'wt.exe',
+      args: ['-w', '0', 'new-tab', '--title', '{title}', '--startingDirectory', '{cwd}', 'cmd', '/k', '{launcher}', '--name', '{name}'],
+      maxPerHour: 6,
+      waitForRegisterMs: 60_000,
+      readyQuietMs: 1200,
+      confirmWorkingMs: 15000,
+    },
     notifications: {
       enabled: true,
       permissionRequests: true,
@@ -56,6 +66,7 @@ function buildConfig(opts?: Partial<HubConfig['summaries']>): HubConfig {
       awayThresholdMinutes: 3,
       apns: { keyPath: '', keyId: '', teamId: '', bundleId: 'com.righttechsoft.ccHubMobile', environment: 'production' },
     },
+    sessions: { reapIntervalMs: 600000, staleAfterMinutes: 240, adoptSessionName: true },
     logLevel: 'info',
   };
 }

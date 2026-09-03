@@ -8,6 +8,7 @@ import { timingSafeEqual } from 'node:crypto';
 import type Database from 'better-sqlite3';
 import type { HubConfig, IAttachRegistry, IPromptDelivery, ILimitWatcher, Logger } from '../types.js';
 import type { HubBus } from '../core/bus.js';
+import { instanceNameFromCwd, resolveExplicitInstanceName } from '../core/identity.js';
 import * as instancesRepo from '../db/repo/instances.js';
 import * as instanceAppsRepo from '../db/repo/instanceApps.js';
 import { WsHub } from './wsHub.js';
@@ -132,9 +133,12 @@ export function buildApp(deps: BuildAppDeps): BuiltApp {
     app.get(
     '/attach',
     upgradeWebSocket(() => {
-      // Registered cwd for this connection — closed over so onClose/onError can unregister the
-      // right slot without the registry needing to reverse-lookup a ws.
+      // Registered cwd/resolved-name for this connection — closed over so onClose/onError can
+      // unregister the right slot without the registry needing to reverse-lookup a ws, and so the
+      // 'url' notice handler below can persist onto the exact right instance row even when
+      // several named siblings share one cwd.
       let registeredCwd: string | undefined;
+      let registeredName: string | undefined;
 
       return {
         onMessage: (evt, ws) => {
@@ -149,12 +153,39 @@ export function buildApp(deps: BuildAppDeps): BuiltApp {
 
           if (parsed.t === 'register' && typeof parsed.cwd === 'string') {
             registeredCwd = parsed.cwd;
-            attach.register(parsed.cwd, {
-              ws,
-              pid: typeof parsed.pid === 'number' ? parsed.pid : 0,
-              lastSeen: Date.now(),
-            });
-            log.info('attach: register', { cwd: parsed.cwd });
+            const now = Date.now();
+            const explicitName = typeof parsed.name === 'string' && parsed.name.length > 0 ? parsed.name : undefined;
+
+            // Resolve the instance (same rule hooksRoutes/hub_register use) at registration time,
+            // so the row exists up front and every subsequent frame on this connection (touch,
+            // output, working, url-notice persistence) keys to the right instance — see
+            // src/core/identity.ts.
+            if (explicitName) {
+              const resolved = resolveExplicitInstanceName(db, explicitName, parsed.cwd);
+              if (resolved.collided) {
+                log.warn('attach: instance name collision, disambiguated', {
+                  requested: explicitName,
+                  resolved: resolved.name,
+                  cwd: parsed.cwd,
+                });
+              }
+              registeredName = resolved.name;
+              instancesRepo.upsertNamed(db, { name: registeredName, cwd: parsed.cwd, now });
+            } else {
+              registeredName = instanceNameFromCwd(db, parsed.cwd);
+              instancesRepo.upsert(db, { name: registeredName, cwd: parsed.cwd, now });
+            }
+
+            attach.register(
+              parsed.cwd,
+              {
+                ws,
+                pid: typeof parsed.pid === 'number' ? parsed.pid : 0,
+                lastSeen: now,
+              },
+              registeredName
+            );
+            log.info('attach: register', { cwd: parsed.cwd, name: registeredName });
             return;
           }
 
@@ -174,6 +205,11 @@ export function buildApp(deps: BuildAppDeps): BuiltApp {
             return;
           }
 
+          if (parsed.t === 'ready') {
+            if (registeredCwd) attach.setReady?.(registeredCwd);
+            return;
+          }
+
           if (parsed.t === 'notice' && typeof parsed.kind === 'string' && typeof parsed.text === 'string') {
             if (registeredCwd && NOTICE_KINDS.has(parsed.kind)) {
               const text = parsed.text.slice(0, NOTICE_TEXT_MAX_CHARS);
@@ -184,7 +220,10 @@ export function buildApp(deps: BuildAppDeps): BuiltApp {
               // failure must not break the /attach WS handler.
               if (parsed.kind === 'url') {
                 try {
-                  const instance = instancesRepo.byCwd(db, registeredCwd);
+                  // By resolved name, not cwd — several named siblings can share a cwd, and
+                  // registeredName (set at registration above) always identifies THIS connection's
+                  // own row.
+                  const instance = registeredName ? instancesRepo.byName(db, registeredName) : undefined;
                   if (instance) {
                     const now = Date.now();
                     instancesRepo.setAppUrl(db, instance.id, text, now);
