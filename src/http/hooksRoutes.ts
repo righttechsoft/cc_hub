@@ -25,6 +25,7 @@ import { slugifySessionName } from '../core/sessionNameIdentity.js';
 import {
   renderChatDeliveredFyi,
   renderInboxContext,
+  renderSameFolderWarning,
   renderSessionStartBanner,
   renderUrgentBlock,
 } from '../core/messageFormat.js';
@@ -181,7 +182,12 @@ export function buildHooksRoutes(deps: HooksRoutesDeps): Hono {
     bus.emit({ type: 'session_status', sessionId: sess.id, status: 'idle' });
 
     const unread = messagesRepo.unreadFor(db, name).length;
-    return renderSessionStartBanner(unread, inst.named ? name : undefined);
+    const banner = renderSessionStartBanner(unread, inst.named ? name : undefined);
+
+    const activeHere = sessionsRepo.activeSessionsForCwd(db, cwd, sess.id);
+    if (activeHere.length === 0) return banner;
+    const warning = renderSameFolderWarning(activeHere.map((s) => s.instanceName));
+    return `${warning}\n${banner}`;
   }
 
   function handleUserPromptSubmit(payload: HookPayload): string | undefined {

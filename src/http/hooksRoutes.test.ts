@@ -160,6 +160,15 @@ async function postSessionName(app: ReturnType<typeof build>['app'], body: Recor
   });
 }
 
+async function postEvent(app: ReturnType<typeof build>['app'], body: Record<string, unknown>) {
+  const res = await app.request('/event', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  return (await res.json()) as { stdout?: string };
+}
+
 describe('POST /hooks/session-name', () => {
   it('stores the session name and returns 204', async () => {
     const db = buildDb();
@@ -289,5 +298,66 @@ describe('POST /hooks/session-name', () => {
     });
 
     expect(res.status).toBe(204);
+  });
+});
+
+describe('SessionStart same-folder warning', () => {
+  it('warns when another session is already active in the same cwd', async () => {
+    const db = buildDb();
+    seedSession(db, { sessionId: 'sess-1', instanceName: 'proj', cwd: 'F:\\rts\\proj' });
+    sessionsRepo.setStatus(db, 'sess-1', 'active', Date.now());
+    const { app } = build(db);
+
+    const { stdout } = await postEvent(app, {
+      hook_event_name: 'SessionStart',
+      session_id: 'sess-2',
+      cwd: 'F:\\rts\\proj',
+    });
+
+    expect(stdout).toContain('WARNING');
+    expect(stdout).toContain('proj');
+  });
+
+  it('does not warn when the only other session in the cwd is idle or ended', async () => {
+    const db = buildDb();
+    seedSession(db, { sessionId: 'sess-1', instanceName: 'proj', cwd: 'F:\\rts\\proj' });
+    sessionsRepo.setStatus(db, 'sess-1', 'idle', Date.now());
+    const { app } = build(db);
+
+    const { stdout } = await postEvent(app, {
+      hook_event_name: 'SessionStart',
+      session_id: 'sess-2',
+      cwd: 'F:\\rts\\proj',
+    });
+
+    expect(stdout).not.toContain('WARNING');
+  });
+
+  it('does not warn about an active session in a different cwd', async () => {
+    const db = buildDb();
+    seedSession(db, { sessionId: 'sess-1', instanceName: 'other', cwd: 'F:\\rts\\other' });
+    sessionsRepo.setStatus(db, 'sess-1', 'active', Date.now());
+    const { app } = build(db);
+
+    const { stdout } = await postEvent(app, {
+      hook_event_name: 'SessionStart',
+      session_id: 'sess-2',
+      cwd: 'F:\\rts\\proj',
+    });
+
+    expect(stdout).not.toContain('WARNING');
+  });
+
+  it('does not warn on the very first session started in a folder', async () => {
+    const db = buildDb();
+    const { app } = build(db);
+
+    const { stdout } = await postEvent(app, {
+      hook_event_name: 'SessionStart',
+      session_id: 'sess-1',
+      cwd: 'F:\\rts\\proj',
+    });
+
+    expect(stdout).not.toContain('WARNING');
   });
 });

@@ -70,6 +70,8 @@ Athen (= *Athenaeum*, a library of collected knowledge) is the machine-wide memo
 
 The interactive-path templates (`messageFormat.ts`) explicitly instruct the agent to show the user each message (sender + full text) and state what it's doing about it — injected context and Stop block reasons are invisible in the terminal UI, so without this the agent could act on mail the human never saw.
 
+**Same-folder warning** (`hooksRoutes.ts`'s `handleSessionStart`, `sessionsRepo.activeSessionsForCwd`): when a new session starts, the hub checks for any OTHER session with `status = 'active'` (mid-turn) whose `cwd` matches (NOCASE), excluding the session that's starting. A match prepends `renderSameFolderWarning` to the SessionStart banner — same invisible-injected-context contract as the message templates above, so it explicitly tells the agent to surface it to the human. Catches both the common accidental case (a second unnamed terminal opened in the same folder) and the intentional one (two named siblings sharing a cwd) — it's informational either way, never blocking. Matches purely on cwd, not instance identity.
+
 ### Message summaries (`src/chat/messageSummarizer.ts`)
 
 Every inter-agent message gets a one-line AI summary (≤8 words, telegraphic) written once into `messages.summary` (migration v4): a bus `'message'` subscriber calls `claude-haiku-4-5` via the CC OAuth token (same fetch pattern as `needsInputFilter.ts`), serialized one-at-a-time, fail-soft (any failure leaves `summary` NULL), plus a 24h startup backfill (one-shot unref'd timer, athen-style). Config `summaries: { enabled, model }`. Consumers read the stored column — no AI call ever happens at render time (the user's statusline shows "→ taskmaster: fix the date bug" style lines from it).

@@ -216,3 +216,60 @@ describe('setSessionName', () => {
     expect(sessionsRepo.get(db, 'sess-1')?.session_name).toBe('wb-sync');
   });
 });
+
+describe('activeSessionsForCwd', () => {
+  it('finds another active session in the same cwd, excluding the one given', () => {
+    const db = buildDb();
+    const now = Date.now();
+    const instance = instancesRepo.upsert(db, { name: 'proj', cwd: 'F:\\rts\\proj', now });
+    sessionsRepo.upsertFromHook(db, { sessionId: 'sess-1', cwd: 'F:\\rts\\proj', transcriptPath: null, instanceId: instance.id, now });
+    sessionsRepo.setStatus(db, 'sess-1', 'active', now);
+    sessionsRepo.upsertFromHook(db, { sessionId: 'sess-2', cwd: 'F:\\rts\\proj', transcriptPath: null, instanceId: instance.id, now });
+
+    const result = sessionsRepo.activeSessionsForCwd(db, 'F:\\rts\\proj', 'sess-2');
+
+    expect(result).toEqual([{ id: 'sess-1', instanceName: 'proj' }]);
+  });
+
+  it('is case-insensitive on cwd', () => {
+    const db = buildDb();
+    const now = Date.now();
+    const instance = instancesRepo.upsert(db, { name: 'proj', cwd: 'F:\\rts\\Proj', now });
+    sessionsRepo.upsertFromHook(db, { sessionId: 'sess-1', cwd: 'F:\\rts\\Proj', transcriptPath: null, instanceId: instance.id, now });
+    sessionsRepo.setStatus(db, 'sess-1', 'active', now);
+
+    expect(sessionsRepo.activeSessionsForCwd(db, 'f:\\rts\\proj', 'sess-2')).toHaveLength(1);
+  });
+
+  it('excludes the given session id even when it is itself active', () => {
+    const db = buildDb();
+    const now = Date.now();
+    const instance = instancesRepo.upsert(db, { name: 'proj', cwd: 'F:\\rts\\proj', now });
+    sessionsRepo.upsertFromHook(db, { sessionId: 'sess-1', cwd: 'F:\\rts\\proj', transcriptPath: null, instanceId: instance.id, now });
+    sessionsRepo.setStatus(db, 'sess-1', 'active', now);
+
+    expect(sessionsRepo.activeSessionsForCwd(db, 'F:\\rts\\proj', 'sess-1')).toEqual([]);
+  });
+
+  it('idle and ended sessions in the same cwd do not count', () => {
+    const db = buildDb();
+    const now = Date.now();
+    const instance = instancesRepo.upsert(db, { name: 'proj', cwd: 'F:\\rts\\proj', now });
+    sessionsRepo.upsertFromHook(db, { sessionId: 'sess-1', cwd: 'F:\\rts\\proj', transcriptPath: null, instanceId: instance.id, now });
+    sessionsRepo.setStatus(db, 'sess-1', 'idle', now);
+    sessionsRepo.upsertFromHook(db, { sessionId: 'sess-2', cwd: 'F:\\rts\\proj', transcriptPath: null, instanceId: instance.id, now });
+    sessionsRepo.setStatus(db, 'sess-2', 'ended', now);
+
+    expect(sessionsRepo.activeSessionsForCwd(db, 'F:\\rts\\proj', 'sess-3')).toEqual([]);
+  });
+
+  it('a different cwd does not match', () => {
+    const db = buildDb();
+    const now = Date.now();
+    const instance = instancesRepo.upsert(db, { name: 'proj', cwd: 'F:\\rts\\proj', now });
+    sessionsRepo.upsertFromHook(db, { sessionId: 'sess-1', cwd: 'F:\\rts\\proj', transcriptPath: null, instanceId: instance.id, now });
+    sessionsRepo.setStatus(db, 'sess-1', 'active', now);
+
+    expect(sessionsRepo.activeSessionsForCwd(db, 'F:\\rts\\other', 'sess-2')).toEqual([]);
+  });
+});
