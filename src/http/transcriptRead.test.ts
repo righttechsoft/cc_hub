@@ -249,6 +249,37 @@ describe('readTranscript', () => {
     expect(second.byteOffset).toBe(statSync(path).size);
   });
 
+  it('does not return or advance past a partial last line, then returns it once completed', async () => {
+    const path = join(dir, 'partial.jsonl');
+    const first = line({ uuid: 'p1', type: 'user', message: { content: 'héllo wörld ✓ 日本語' } }) + '\n';
+    const second = line({ uuid: 'p2', type: 'user', message: { content: 'second' } });
+    const split = Math.floor(second.length / 2);
+    writeFileSync(path, first + second.slice(0, split), 'utf8');
+
+    const partial = await readTranscript(path, { tailBytes: 262144 });
+    expect(partial.entries.map((e) => e.uuid)).toEqual(['p1']);
+    expect(partial.byteOffset).toBe(Buffer.byteLength(first, 'utf8'));
+
+    appendFileSync(path, second.slice(split) + '\n', 'utf8');
+
+    const next = await readTranscript(path, { afterByte: partial.byteOffset, tailBytes: 262144 });
+    expect(next.entries.map((e) => e.uuid)).toEqual(['p2']);
+    expect(next.byteOffset).toBe(statSync(path).size);
+  });
+
+  it('returns nothing and does not advance when the range has no newline', async () => {
+    const path = join(dir, 'nonewline.jsonl');
+    writeFileSync(path, '{"uuid":"n1","type":"us', 'utf8');
+
+    const fresh = await readTranscript(path, { tailBytes: 262144 });
+    expect(fresh.entries).toEqual([]);
+    expect(fresh.byteOffset).toBe(0);
+
+    const incremental = await readTranscript(path, { afterByte: 0, tailBytes: 262144 });
+    expect(incremental.entries).toEqual([]);
+    expect(incremental.byteOffset).toBe(0);
+  });
+
   it('falls back to a fresh tail when afterByte exceeds the current file size', async () => {
     const path = join(dir, 'rotated.jsonl');
     writeFileSync(path, line({ uuid: 'z1', type: 'user', message: { content: 'rotated prompt' } }) + '\n', 'utf8');

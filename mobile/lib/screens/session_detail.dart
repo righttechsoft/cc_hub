@@ -172,8 +172,6 @@ class _SessionDetailScreenState extends State<SessionDetailScreen> {
 
   void _pollTranscript() {
     if (!mounted || !_transcriptAvailable) return;
-    final status = context.read<HubStore>().sessions[widget.sessionId]?.status ?? _session?.status;
-    if (status != 'active') return;
     _loadTranscript();
   }
 

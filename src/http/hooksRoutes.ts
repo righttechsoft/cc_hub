@@ -320,6 +320,7 @@ export function buildHooksRoutes(deps: HooksRoutesDeps): Hono {
 
     sessionsRepo.setStatus(db, sessionId, 'idle', now);
     eventsRepo.record(db, { sessionId, instanceName, type: 'Stop', payload: null, now });
+    bus.emit({ type: 'session_event', sessionId, eventType: 'Stop', payload: null, createdAt: now });
     bus.emit({ type: 'session_status', sessionId, status: 'idle' });
     return undefined;
   }

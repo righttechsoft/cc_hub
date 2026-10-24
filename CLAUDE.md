@@ -151,7 +151,7 @@ Backs AI Overlord's dispatch mode above: reuse an idle attached `cc-attach` term
 
 `POST /sessions` spawns a brand-new headless session (`claude -p "<prompt>"`, no `--resume`) in a given `cwd`; fire-and-forget — 202 `{spawned:true}` once `runner.startNew()` is kicked off, the session self-registers via the SessionStart hook once it starts.
 
-`GET /sessions/:id/transcript` (`src/http/transcriptRead.ts`) reads and parses the session's CC transcript JSONL at `transcript_path` so mobile can render the real conversation (user/assistant text, `tool_use`, `tool_result`) instead of just hook events. Tail read on first call, byte-offset (`afterByte`) incremental reads after that; 409 `no_transcript` if the session has no `transcript_path` or the file can't be read.
+`GET /sessions/:id/transcript` (`src/http/transcriptRead.ts`) reads and parses the session's CC transcript JSONL at `transcript_path` so mobile can render the real conversation (user/assistant text, `tool_use`, `tool_result`) instead of just hook events. Tail read on first call, byte-offset (`afterByte`) incremental reads after that — the returned `byteOffset` stops just past the last `\n` in the bytes read, so a line CC is still mid-write is re-read whole next time instead of being skipped for good; 409 `no_transcript` if the session has no `transcript_path` or the file can't be read.
 
 ## Function 3 — limit watcher (`src/limit/`)
 

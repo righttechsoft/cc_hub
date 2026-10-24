@@ -178,17 +178,28 @@ export function parseTranscriptChunk(chunk: string, skipFirstLine: boolean): Tra
   return entries;
 }
 
-async function readRange(path: string, start: number, end: number): Promise<string> {
+async function readRange(path: string, start: number, end: number): Promise<Buffer> {
   const length = end - start;
-  if (length <= 0) return '';
+  if (length <= 0) return Buffer.alloc(0);
   const handle = await open(path, 'r');
   try {
     const buf = Buffer.alloc(length);
-    await handle.read(buf, 0, length, start);
-    return buf.toString('utf8');
+    const { bytesRead } = await handle.read(buf, 0, length, start);
+    return buf.subarray(0, bytesRead);
   } finally {
     await handle.close();
   }
+}
+
+function parseCompleteLines(
+  buf: Buffer,
+  start: number,
+  skipFirstLine: boolean
+): { entries: TranscriptEntry[]; byteOffset: number } {
+  const lastNewline = buf.lastIndexOf(0x0a);
+  if (lastNewline < 0) return { entries: [], byteOffset: start };
+  const entries = parseTranscriptChunk(buf.subarray(0, lastNewline + 1).toString('utf8'), skipFirstLine);
+  return { entries, byteOffset: start + lastNewline + 1 };
 }
 
 export async function readTranscript(
@@ -207,15 +218,13 @@ export async function readTranscript(
       start = size - MAX_READ_BYTES;
       truncatedHead = true;
     }
-    const chunk = await readRange(path, start, size);
-    const entries = parseTranscriptChunk(chunk, truncatedHead);
-    return { entries, byteOffset: size, truncatedHead };
+    const buf = await readRange(path, start, size);
+    return { ...parseCompleteLines(buf, start, truncatedHead), truncatedHead };
   }
 
   // Fresh tail: no afterByte, or afterByte > size (file replaced/rotated) falls through here.
   const start = Math.max(0, size - tailBytes);
   const truncatedHead = size > tailBytes;
-  const chunk = await readRange(path, start, size);
-  const entries = parseTranscriptChunk(chunk, truncatedHead);
-  return { entries, byteOffset: size, truncatedHead };
+  const buf = await readRange(path, start, size);
+  return { ...parseCompleteLines(buf, start, truncatedHead), truncatedHead };
 }

@@ -11,6 +11,7 @@ import * as instancesRepo from '../db/repo/instances.js';
 import * as sessionsRepo from '../db/repo/sessions.js';
 import type {
   HubConfig,
+  HubEvent,
   IAttachRegistry,
   IClaudeRunner,
   IPromptDelivery,
@@ -135,7 +136,7 @@ function build(db: Database.Database, opts?: { adoptSessionName?: boolean }) {
     attach,
     getGateway: () => gateway,
   });
-  return { app, attach, gateway, log };
+  return { app, attach, gateway, log, bus };
 }
 
 // Seeds an instance + a session bound to it, mirroring how ensureInstanceAndSession sets things up
@@ -298,6 +299,22 @@ describe('POST /hooks/session-name', () => {
     });
 
     expect(res.status).toBe(204);
+  });
+});
+
+describe('Stop', () => {
+  it('emits a session_event for Stop on the idle path', async () => {
+    const db = buildDb();
+    seedSession(db, { sessionId: 'sess-1', instanceName: 'proj', cwd: '/proj' });
+    const { app, bus } = build(db);
+    const seen: HubEvent[] = [];
+    bus.on((e) => seen.push(e));
+
+    await postEvent(app, { hook_event_name: 'Stop', session_id: 'sess-1', cwd: '/proj' });
+
+    expect(seen).toContainEqual(
+      expect.objectContaining({ type: 'session_event', sessionId: 'sess-1', eventType: 'Stop', payload: null })
+    );
   });
 });
 
