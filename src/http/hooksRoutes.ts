@@ -184,9 +184,9 @@ export function buildHooksRoutes(deps: HooksRoutesDeps): Hono {
     const unread = messagesRepo.unreadFor(db, name).length;
     const banner = renderSessionStartBanner(unread, inst.named ? name : undefined);
 
-    const activeHere = sessionsRepo.activeSessionsForCwd(db, cwd, sess.id);
-    if (activeHere.length === 0) return banner;
-    const warning = renderSameFolderWarning(activeHere.map((s) => s.instanceName));
+    const liveHere = sessionsRepo.liveSessionsForCwd(db, cwd, sess.id);
+    if (liveHere.length === 0) return banner;
+    const warning = renderSameFolderWarning(liveHere.map((s) => s.instanceName));
     return `${warning}\n${banner}`;
   }
 

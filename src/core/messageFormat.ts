@@ -28,17 +28,17 @@ export function renderSessionStartBanner(unread: number, instanceName?: string):
   return `[cc-hub] You have ${unread} unread message(s) from other Claude instances — call chat_inbox and show the user what arrived.${identityLine} ${KB_LINE}`;
 }
 
-// SessionStart hook stdout: another session is already active (mid-turn) in this same folder.
-// Injected context is invisible in the terminal UI (see renderInboxContext below), so the agent
-// is told to surface it — otherwise a human could end up running two agents against the same
-// files without realizing it.
+// SessionStart hook stdout: another session is already open (not ended — mid-turn, idle at the
+// prompt, interrupted, or continuing) in this same folder. Injected context is invisible in the
+// terminal UI (see renderInboxContext below), so the agent is told to surface it — otherwise a
+// human could end up running two agents against the same files without realizing it.
 export function renderSameFolderWarning(instanceNames: string[]): string {
   const who = instanceNames.join(', ');
   const isAre = instanceNames.length === 1 ? 'is' : 'are';
   return (
     `[cc-hub] WARNING: ${instanceNames.length} other session${instanceNames.length === 1 ? '' : 's'} (${who}) ${isAre} ` +
-    `already active in this same folder. This context is invisible to the user — tell them this before doing anything ` +
-    `that could conflict with that other session's work.`
+    `already open in this same folder. This context is invisible to the user — tell them this immediately, ` +
+    `in your first reply, before doing anything that could conflict with that other session's work.`
   );
 }
 

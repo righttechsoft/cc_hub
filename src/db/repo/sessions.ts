@@ -275,13 +275,17 @@ export function hasActiveSessionForInstance(db: Database.Database, name: string,
 }
 
 // SessionStart same-folder warning (src/http/hooksRoutes.ts handleSessionStart): other sessions
-// already 'active' (mid-turn) in this exact cwd when a new session starts here too — surfaced as
-// a banner warning so a human doesn't unknowingly run two agents against the same files at once.
-// Excludes the session that's starting (its own row already exists and is forced to 'idle' before
-// this runs, so it can never match itself anyway — the exclusion guards future callers). Matches
-// by cwd only, not instance — deliberately catches the common "opened a second unnamed terminal in
-// the same folder" case as well as two named siblings sharing a cwd.
-export function activeSessionsForCwd(
+// still open (any status except 'ended') in this exact cwd when a new session starts here too —
+// surfaced as a banner warning so a human doesn't unknowingly run two agents against the same
+// files at once. Deliberately NOT narrowed to status='active' (mid-turn only): the common trigger
+// is two terminals opened side by side, both sitting idle at the prompt — neither is ever
+// mid-turn at the exact moment the second one's SessionStart fires, so an active-only check would
+// silently never match the scenario it exists for. Excludes the session that's starting (its own
+// row already exists and is forced to 'idle' before this runs, so it can never match itself
+// anyway — the exclusion guards future callers). Matches by cwd only, not instance — catches both
+// the common "opened a second unnamed terminal in the same folder" case and two named siblings
+// deliberately sharing a cwd.
+export function liveSessionsForCwd(
   db: Database.Database,
   cwd: string,
   excludeSessionId: string
@@ -292,7 +296,7 @@ export function activeSessionsForCwd(
      FROM sessions
      LEFT JOIN instances ON instances.id = sessions.instance_id
      WHERE sessions.cwd = ? COLLATE NOCASE
-       AND sessions.status = 'active'
+       AND sessions.status != 'ended'
        AND sessions.id != ?`
   ).all(cwd, excludeSessionId) as { id: string; instanceName: string | null }[];
   return rows.map((r) => ({ id: r.id, instanceName: r.instanceName ?? '?' }));

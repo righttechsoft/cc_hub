@@ -318,10 +318,25 @@ describe('SessionStart same-folder warning', () => {
     expect(stdout).toContain('proj');
   });
 
-  it('does not warn when the only other session in the cwd is idle or ended', async () => {
+  it('warns when the other session in the cwd is only IDLE — the common side-by-side-terminals case', async () => {
     const db = buildDb();
     seedSession(db, { sessionId: 'sess-1', instanceName: 'proj', cwd: 'F:\\rts\\proj' });
     sessionsRepo.setStatus(db, 'sess-1', 'idle', Date.now());
+    const { app } = build(db);
+
+    const { stdout } = await postEvent(app, {
+      hook_event_name: 'SessionStart',
+      session_id: 'sess-2',
+      cwd: 'F:\\rts\\proj',
+    });
+
+    expect(stdout).toContain('WARNING');
+  });
+
+  it('does not warn when the only other session in the cwd has ENDED', async () => {
+    const db = buildDb();
+    seedSession(db, { sessionId: 'sess-1', instanceName: 'proj', cwd: 'F:\\rts\\proj' });
+    sessionsRepo.setStatus(db, 'sess-1', 'ended', Date.now());
     const { app } = build(db);
 
     const { stdout } = await postEvent(app, {

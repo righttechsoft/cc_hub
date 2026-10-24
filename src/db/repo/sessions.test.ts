@@ -217,8 +217,8 @@ describe('setSessionName', () => {
   });
 });
 
-describe('activeSessionsForCwd', () => {
-  it('finds another active session in the same cwd, excluding the one given', () => {
+describe('liveSessionsForCwd', () => {
+  it('finds another active (mid-turn) session in the same cwd, excluding the one given', () => {
     const db = buildDb();
     const now = Date.now();
     const instance = instancesRepo.upsert(db, { name: 'proj', cwd: 'F:\\rts\\proj', now });
@@ -226,9 +226,22 @@ describe('activeSessionsForCwd', () => {
     sessionsRepo.setStatus(db, 'sess-1', 'active', now);
     sessionsRepo.upsertFromHook(db, { sessionId: 'sess-2', cwd: 'F:\\rts\\proj', transcriptPath: null, instanceId: instance.id, now });
 
-    const result = sessionsRepo.activeSessionsForCwd(db, 'F:\\rts\\proj', 'sess-2');
+    const result = sessionsRepo.liveSessionsForCwd(db, 'F:\\rts\\proj', 'sess-2');
 
     expect(result).toEqual([{ id: 'sess-1', instanceName: 'proj' }]);
+  });
+
+  // Regression case: the common trigger is two terminals opened side by side, both just sitting
+  // idle at the prompt — neither is ever mid-turn at the exact moment the second one's
+  // SessionStart fires, so an active-only check silently never matches this scenario.
+  it('finds another IDLE session in the same cwd too — the common side-by-side-terminals case', () => {
+    const db = buildDb();
+    const now = Date.now();
+    const instance = instancesRepo.upsert(db, { name: 'proj', cwd: 'F:\\rts\\proj', now });
+    sessionsRepo.upsertFromHook(db, { sessionId: 'sess-1', cwd: 'F:\\rts\\proj', transcriptPath: null, instanceId: instance.id, now });
+    sessionsRepo.setStatus(db, 'sess-1', 'idle', now);
+
+    expect(sessionsRepo.liveSessionsForCwd(db, 'F:\\rts\\proj', 'sess-2')).toEqual([{ id: 'sess-1', instanceName: 'proj' }]);
   });
 
   it('is case-insensitive on cwd', () => {
@@ -238,7 +251,7 @@ describe('activeSessionsForCwd', () => {
     sessionsRepo.upsertFromHook(db, { sessionId: 'sess-1', cwd: 'F:\\rts\\Proj', transcriptPath: null, instanceId: instance.id, now });
     sessionsRepo.setStatus(db, 'sess-1', 'active', now);
 
-    expect(sessionsRepo.activeSessionsForCwd(db, 'f:\\rts\\proj', 'sess-2')).toHaveLength(1);
+    expect(sessionsRepo.liveSessionsForCwd(db, 'f:\\rts\\proj', 'sess-2')).toHaveLength(1);
   });
 
   it('excludes the given session id even when it is itself active', () => {
@@ -248,19 +261,17 @@ describe('activeSessionsForCwd', () => {
     sessionsRepo.upsertFromHook(db, { sessionId: 'sess-1', cwd: 'F:\\rts\\proj', transcriptPath: null, instanceId: instance.id, now });
     sessionsRepo.setStatus(db, 'sess-1', 'active', now);
 
-    expect(sessionsRepo.activeSessionsForCwd(db, 'F:\\rts\\proj', 'sess-1')).toEqual([]);
+    expect(sessionsRepo.liveSessionsForCwd(db, 'F:\\rts\\proj', 'sess-1')).toEqual([]);
   });
 
-  it('idle and ended sessions in the same cwd do not count', () => {
+  it('only ENDED sessions in the same cwd do not count', () => {
     const db = buildDb();
     const now = Date.now();
     const instance = instancesRepo.upsert(db, { name: 'proj', cwd: 'F:\\rts\\proj', now });
     sessionsRepo.upsertFromHook(db, { sessionId: 'sess-1', cwd: 'F:\\rts\\proj', transcriptPath: null, instanceId: instance.id, now });
-    sessionsRepo.setStatus(db, 'sess-1', 'idle', now);
-    sessionsRepo.upsertFromHook(db, { sessionId: 'sess-2', cwd: 'F:\\rts\\proj', transcriptPath: null, instanceId: instance.id, now });
-    sessionsRepo.setStatus(db, 'sess-2', 'ended', now);
+    sessionsRepo.setStatus(db, 'sess-1', 'ended', now);
 
-    expect(sessionsRepo.activeSessionsForCwd(db, 'F:\\rts\\proj', 'sess-3')).toEqual([]);
+    expect(sessionsRepo.liveSessionsForCwd(db, 'F:\\rts\\proj', 'sess-2')).toEqual([]);
   });
 
   it('a different cwd does not match', () => {
@@ -270,6 +281,6 @@ describe('activeSessionsForCwd', () => {
     sessionsRepo.upsertFromHook(db, { sessionId: 'sess-1', cwd: 'F:\\rts\\proj', transcriptPath: null, instanceId: instance.id, now });
     sessionsRepo.setStatus(db, 'sess-1', 'active', now);
 
-    expect(sessionsRepo.activeSessionsForCwd(db, 'F:\\rts\\other', 'sess-2')).toEqual([]);
+    expect(sessionsRepo.liveSessionsForCwd(db, 'F:\\rts\\other', 'sess-2')).toEqual([]);
   });
 });
